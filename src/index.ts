@@ -2,29 +2,27 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
-  initDb,
-  bulkInsert,
-  applyExitCodes,
   searchCommands,
   getRecentCommands,
   formatRows,
+  countEmbeddings,
 } from "./db.ts";
-import { parseAllAvailableHistory } from "./historyParser.ts";
-import { parseExitLog, getExitLogPath } from "./exitLog.ts";
+import { runImport } from "./import.ts";
+import { getExitLogPath } from "./exitLog.ts";
 import { loadConfig } from "./config.ts";
 import {
   semanticSearch,
   backfillMissingEmbeddings,
   EMBEDDING_MODEL_ID,
 } from "./embeddings.ts";
-import { countEmbeddings } from "./db.ts";
+import packageJson from "../package.json" with { type: "json" };
 
 // NOTE: all logging goes to stderr (console.error). stdout is owned by the
 // MCP stdio transport (JSON-RPC frames) — writing there corrupts the protocol.
 
 const server = new McpServer({
   name: "mnemyx",
-  version: "0.1.0",
+  version: packageJson.version,
 });
 
 server.tool(
@@ -106,21 +104,21 @@ server.tool(
 );
 
 async function main(): Promise<void> {
-  // 1. Open/create the local SQLite DB (runs migrations idempotently).
-  initDb();
-  // 2. Parse whichever history files exist and import them (idempotent).
-  const entries = parseAllAvailableHistory();
-  const added = bulkInsert(entries);
+  // Shared import pipeline (same code the `mnemyx init` CLI runs).
+  const result = runImport();
   console.error(
-    `[mnemyx] import complete: ${added} new, ${entries.length - added} already indexed`
+    `[mnemyx] import complete: ${result.added} new, ${result.parsed - result.added} already indexed`
   );
-  // 3. Phase 3: stamp hook-observed exit codes onto matching rows.
-  // Missing log file = hook not installed = silent no-op (pure Phase 2).
-  const outcomes = parseExitLog();
-  if (outcomes.size > 0) {
-    const updated = applyExitCodes(outcomes);
+  if (result.ageFilteredOut > 0) {
     console.error(
-      `[mnemyx] exit codes: ${outcomes.size} distinct commands logged, ${updated} history rows annotated`
+      `[mnemyx] age filter: skipped ${result.ageFilteredOut} entries older than the configured max history age`
+    );
+  }
+  if (!result.exitCodesEnabled) {
+    console.error(`[mnemyx] exit codes: disabled via config`);
+  } else if (result.exitOutcomes > 0) {
+    console.error(
+      `[mnemyx] exit codes: ${result.exitOutcomes} distinct commands logged, ${result.exitUpdated} history rows annotated`
     );
   } else {
     console.error(

@@ -1,8 +1,30 @@
 {
-  "name": "terminal-history-mcp",
+  "name": "mnemyx",
+  "version": "0.1.0",
+  "description": "Local-first MCP server giving AI coding assistants a searchable memory of your real shell history",
+  "license": "MIT",
   "module": "src/index.ts",
   "type": "module",
-  "private": true,
+  "bin": {
+    "mnemyx": "./src/cli.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "shell-history",
+    "sqlite",
+    "local-first",
+    "ai-assistant",
+    "cli"
+  ],
+  "engines": {
+    "bun": ">=1.4"
+  },
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "typescript": "^7.0.2"

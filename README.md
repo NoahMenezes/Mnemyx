@@ -1,202 +1,172 @@
 # Mnemyx
 
-Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives AI coding assistants (Claude Code, Claude Desktop, Cursor, …) a searchable memory of your real shell history.
+Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives AI coding assistants a searchable memory of your real shell history.
 
-**Problem:** you solve the same cryptic errors repeatedly across projects and months, but the fix is buried unsearchable in `~/.zsh_history` or `~/.bash_history`. AI assistants have zero access to it and re-derive solutions from scratch every session. Mnemyx indexes your shell history locally and exposes it as MCP tools, so any MCP-compatible client can ask *"have I solved this before?"*
+**The problem:** you solve the same cryptic errors repeatedly across projects and months, but the fix is buried unsearchable in `~/.zsh_history` or `~/.bash_history`. AI assistants (Claude Code, Claude Desktop, Cursor, …) have zero access to it and re-derive solutions from scratch every session. Mnemyx indexes your shell history locally — with full-text search, outcome tracking, and semantic matching — and exposes it as MCP tools, so any compatible client can ask *"have I solved this before?"* and get back what you actually ran, whether it worked, and what it means.
 
-**Principles:**
-- **100% local-first, privacy by default** — nothing leaves your machine. No telemetry, no cloud calls, ever.
-- **Runtime is Bun** — install/run/test everything with `bun`.
-- **Storage is `bun:sqlite`** (Bun's built-in SQLite). No `better-sqlite3`, no native compilation.
-- **Transport is stdio** — this runs locally, invoked by MCP clients, not over HTTP.
+## 5-minute quickstart
 
-> Note: the repo directory is still named `terminal-history-mcp` (legacy from `bun init`); the project itself is Mnemyx.
-
-## Prerequisites
-
-- [Bun](https://bun.sh) ≥ 1.4
-- An MCP client: Claude Code, Claude Desktop, Cursor, or the MCP Inspector for testing
-
-## Install
+Prerequisites: [Bun](https://bun.sh) ≥ 1.4 (the only runtime dependency) and `python3` (only needed for the optional exit-code hook).
 
 ```bash
+# Option A: try it without installing (needs Bun)
+bunx mnemyx init
+
+# Option B: from source
+git clone <repo-url> && cd mnemyx
 bun install
+bun run src/cli.ts init
 ```
 
-Typecheck:
+`mnemyx init` walks you through four steps: environment check → history import (idempotent, safe to re-run) → **optional** shell-hook install (asks first, never silent) → client registration commands. Then verify:
 
-```bash
-bunx tsc --noEmit
-```
+1. `mnemyx status` — commands indexed, FTS docs, vectors, hook state.
+2. In your client: ask it to call `get_recent_commands` — you should see your real recent commands.
+3. Ask *"have I ever fixed a docker permissions error?"* — `search_history` should find it, including *why* it matches.
 
-## Tools
-
-| Tool | Arguments | Description |
-|---|---|---|
-| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`) | Natural-language semantic search (local embeddings) with keyword fallback; successes rank first, annotated `[exit N]` |
-| `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, for general context (noise filtered, outcomes annotated) |
-
-Example — "have I fixed this docker error before?":
-
-```json
-{ "query": "docker wont start", "limit": 10 }
-```
-
-Semantic search matches *meaning*, not just words — that query surfaces a past `sudo systemctl enable --now docker` fix even though they share almost no tokens. When only keywords match, or semantic is unavailable, the same FTS5 keyword ranking from Phase 2 applies.
-
-Response (newest first, with timestamps, shell, and source file):
-
-```text
-1. [2026-09-10T14:22:31.000Z] [zsh] sudo usermod -aG docker $USER
-   source: /home/you/.zsh_history
-```
-
-## Supported shells (Phase 1: macOS/Linux, zsh + bash only)
-
-Both detected automatically — whichever files exist on disk are indexed and merged. A missing file is skipped gracefully.
-
-| Shell | File | Format |
-|---|---|---|
-| zsh (macOS default, common on Linux) | `~/.zsh_history` | Extended `: <timestamp>:<duration>;<command>`; plain lines fall back to mtime |
-| bash | `~/.bash_history` | One command per line; file mtime as approximate timestamp |
-
-Each result is tagged with `source_file` **and** `shell` so you can see provenance. Bash timestamps are marked `(approx. time)` since that format stores no timestamps.
-
-## Search quality (Phase 2)
-
-- **Full-text search**: `search_history` uses SQLite FTS5 with BM25 ranking instead of substring matching. Multi-word queries narrow results (`git commit` requires both words), and each word prefix-matches (`commi` finds `commit`). Queries containing no searchable words (e.g. only symbols like `&&`) fall back to substring matching so the tool never breaks.
-- **Noise filtering**: commands whose first word is in the denylist (`ls`, `cd`, `clear`, `pwd`, `exit`, …) are excluded from both tools. Extend the list in `~/.mnemyx/config.json` (optional — missing file just means built-ins):
-  ```json
-  { "denylist": ["vim", "nano", "htop"] }
-  ```
-  Your entries are *added to* the built-ins, never replace them. Edits take effect immediately, no restart needed.
-- **Consecutive de-duplication**: identical back-to-back commands within one history file are collapsed to one row at import time (`ls` × 5 keeps a single entry).
-
-## Semantic search (Phase 4) — local embeddings, keyword fallback
-
-`search_history` defaults to `mode: "auto"`: meaning-based search when available, FTS5 keyword search otherwise. Pass `mode: "semantic"` to force it (falls back with a visible note if unavailable) or `mode: "keyword"` for the pure Phase 2/3 behavior. Denylist, `only_successful`, outcome tiers, and `[exit N]` annotations behave identically on both paths — only relevance scoring differs.
-
-- **Model**: `Xenova/all-MiniLM-L6-v2`, int8-quantized, 384 dims, ONNX CPU inference via `@huggingface/transformers`. Chosen because it's fully offline after a one-time download (cloud APIs rejected per local-first; an Ollama-style daemon rejected as an extra dependency; native-heavy toolchains rejected per the no-compilation principle).
-- **Storage (one-time)**: ~23 MB model weights in `~/.cache/mnemyx/models` (override with `HF_HOME`; deliberately outside `node_modules` so reinstalls never trigger a re-download), ~350 MB of npm packages (almost entirely the ONNX runtime's multi-platform binaries), ~3 MB of vectors for ~2000 commands inside the existing SQLite DB, ~100–200 MB RAM while embedding.
-- **Flow**: on startup the server serves immediately (keyword path) while missing commands embed in the background (~8 s per ~400 commands on a 12-core CPU; noise-denylisted commands are skipped). New history rows embed the same way on subsequent launches.
-- **Scale-up path**: one constant in `src/embeddings.ts` (`EMBEDDING_DTYPE: "q8"` → `"fp32"`, ~87 MB download, or a larger model id). Stored vectors are tagged with the exact model id, so old vectors are pruned and re-embedded automatically — no migration.
-- **Disable**: `{ "embeddings": false }` in `~/.mnemyx/config.json` → pure keyword search, model never loads. If the model can't load (offline first run, broken install), the tool degrades to keyword results instead of erroring — it never breaks entirely.
-
-## Outcome signal (Phase 3) — optional shell hook
-
-Search hits can now tell "I tried this" from "this actually worked". Each command may carry its exit code: `[exit 0]` worked, `[exit 1]` failed, no marker means unknown (all history from before you install the hook — unknown is *not* failure). Ranking puts proven successes first, unknowns next, failures last; pass `only_successful: true` to see *only* proven exit-0 commands.
-
-This requires a tiny shell hook that logs each command's exit code to `~/.mnemyx/exit-codes.log` (local JSON lines, one per command). **It is strictly opt-in — Mnemyx never touches your shell config.** Without the log file everything behaves exactly as Phase 2.
-
-**Setup (2 minutes):**
-
-1. Prerequisites: `python3` on your PATH (preinstalled on macOS and most Linux distros), then:
-   ```bash
-   mkdir -p ~/.mnemyx
-   ```
-2. Append **one** of these blocks to your rc file:
-
-   zsh (`~/.zshrc`):
-   ```sh
-   # --- Mnemyx (optional): log each command's exit code locally for shell-history search.
-   # Appends JSON lines to ~/.mnemyx/exit-codes.log. Nothing leaves your machine.
-   # Remove this block to disable.
-   _mnemyx_precmd() {
-     local code=$?
-     local cmd
-     cmd=$(fc -ln -1 2>/dev/null | sed -e 's/^[[:space:]]*//')
-     if [ -n "$cmd" ]; then
-       MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" python3 -c \
-         'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"]}))' \
-         >> "$HOME/.mnemyx/exit-codes.log" 2>/dev/null
-     fi
-     return "$code"
-   }
-   autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _mnemyx_precmd
-   ```
-
-   bash (`~/.bashrc`):
-   ```sh
-   # --- Mnemyx (optional): log each command's exit code locally for shell-history search.
-   # Appends JSON lines to ~/.mnemyx/exit-codes.log. Nothing leaves your machine.
-   # Remove this block (and the PROMPT_COMMAND entry) to disable.
-   _mnemyx_prompt() {
-     local code=$?
-     local cmd
-     cmd=$(history 1 2>/dev/null | sed -e 's/^[[:space:]]*[0-9]*[[:space:]]*//')
-     if [ -n "$cmd" ]; then
-       MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" python3 -c \
-         'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"]}))' \
-         >> "$HOME/.mnemyx/exit-codes.log" 2>/dev/null
-     fi
-     return "$code"
-   }
-   if [[ "${PROMPT_COMMAND:-}" != *"_mnemyx_prompt"* ]]; then
-     PROMPT_COMMAND="_mnemyx_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
-   fi
-   ```
-
-3. Reload (`source ~/.zshrc`, or open a new terminal), then verify:
-   ```bash
-   true; false; tail -n 2 ~/.mnemyx/exit-codes.log
-   ```
-   You should see two JSON lines, one with `"exit": 0`, one with `"exit": 1`.
-4. Restart the MCP server (it re-imports on every launch). Its stderr will report e.g. `exit codes: 12 distinct commands logged, 30 history rows annotated`.
-5. Search: hits for logged commands now show `[exit 0]` / `[exit 1]`; try `only_successful: true` to filter to proven fixes.
-
-Semantics to know: matching is by exact command text, and a command keeps its **most recent** observed exit code. Re-imports are idempotent. The log is append-only (no rotation yet — a few KB per thousand commands; safe to truncate anytime, worst case outcomes return to unknown until commands re-run).
-
-## Register with Claude Code
-
-```bash
-claude mcp add mnemyx -- bun run /absolute/path/to/terminal-history-mcp/src/index.ts
-```
-
-(Use the absolute path to your checkout — MCP clients launch the server with an unpredictable cwd.)
-
-Then verify:
-
-1. `/mcp` in Claude Code — `mnemyx` should show as connected.
-2. Ask it to call `get_recent_commands` — you should see your real recent commands.
-3. Ask it something like *"have I ever cloned zsh-autosuggestions?"* — `search_history` should find it.
-
-Alternative (no client needed) — MCP Inspector:
+No client handy? Test with the MCP Inspector (no setup needed):
 
 ```bash
 bunx @modelcontextprotocol/inspector bun run src/index.ts
 ```
 
-## Configuration
+## Connect your AI client
 
-No env vars, no API keys — everything is local. `~/.mnemyx/config.json` is optional (missing file = built-in defaults):
+The server runs over stdio — the client spawns it locally. Replace the paths with your checkout (or installed package) location.
 
-```json
-{ "denylist": ["vim", "nano", "htop"], "embeddings": true }
+**Claude Code** (terminal — `mnemyx init` can run this for you with consent):
+
+```bash
+claude mcp add mnemyx -- bun run /absolute/path/to/mnemyx/src/index.ts
 ```
 
-- `denylist`: extra noise commands, *added to* the built-ins. Takes effect immediately.
-- `embeddings`: `false` disables semantic search entirely (pure keyword, model never loads).
+Then `/mcp` to confirm it's connected.
 
-The SQLite DB lives outside the repo so it works regardless of launch cwd:
+**Claude Desktop** — add to `claude_desktop_config.json` (`~/.config/Claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/` on macOS):
 
-- Linux: `~/.local/share/mnemyx/mnemyx.db` (respects `XDG_DATA_HOME`)
-- macOS: `~/Library/Application Support/mnemyx/mnemyx.db`
+```json
+{
+  "mcpServers": {
+    "mnemyx": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+    }
+  }
+}
+```
 
-Re-imports are idempotent (`INSERT OR IGNORE` on `(command, timestamp, source_file)`), so restarting the server never creates duplicates.
+Use the absolute `bun` path (`which bun`) if Desktop can't find it on PATH. Restart Claude Desktop afterwards.
+
+**Cursor** — Settings → MCP → Add server (same command/args shape as above), or add to `.cursor/mcp.json` in your workspace:
+
+```json
+{
+  "mcpServers": {
+    "mnemyx": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+    }
+  }
+}
+```
+
+## Tools
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`) | Natural-language semantic search over your history (local embeddings) with FTS5 keyword fallback. Proven exit-0 commands rank first; hits annotated `[exit N]` when the outcome is known |
+| `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, chronological (noise filtered, outcomes annotated) |
+
+Usage examples (as you'd prompt your assistant):
+
+- *"Use mnemyx search_history for 'docker wont start'"* → your past `sudo systemctl enable --now docker` fix, even though the words barely overlap.
+- *"Use mnemyx search_history for 'usermod', only successful ones"* → just the commands proven to exit 0.
+- *"Use mnemyx search_history for 'commi' in keyword mode"* → prefix-matched `git commit` rows (exact-token search, no semantics).
+- *"Use mnemyx get_recent_commands to see what I was doing"* → recent context, noise (`ls`, `cd`) filtered out.
+
+## How it works
+
+**Supported shells (macOS/Linux, zsh + bash).** `~/.zsh_history` (extended `: timestamp:duration;command` format, including multiline commands) and `~/.bash_history` (plain lines, file-mtime fallback timestamps marked approximate) are auto-detected, parsed, merged, and tagged with `source_file` + `shell`. Missing files are skipped gracefully.
+
+**Search in layers.** `auto` mode tries vectors first, then FTS5 BM25 keyword ranking (multi-word queries AND-narrow, prefix matching), then substring match for symbol-only queries — the tool always returns *something* rather than erroring. `only_successful: true` restricts to proven exit-0 rows (unknown outcomes are excluded: unknown ≠ worked).
+
+**Outcome signal (optional hook).** A ~15-line `precmd`/`PROMPT_COMMAND` snippet logs `{"ts","exit","cmd"}` lines to `~/.mnemyx/exit-codes.log`. Each history row keeps its most recent observed exit code; ranking tiers successes → unknowns → failures. Install via `mnemyx init` (asks first) or copy from the snippet below. To fully uninstall, remove the block from your rc file (a `{"exitCodes": false}` config only stops *reading* the log).
+
+```sh
+# zsh (~/.zshrc) — full snippet; bash version in `mnemyx init` / source
+_mnemyx_precmd() {
+  local code=$?
+  local cmd
+  cmd=$(fc -ln -1 2>/dev/null | sed -e 's/^[[:space:]]*//')
+  if [ -n "$cmd" ]; then
+    MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" python3 -c \
+      'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"]}))' \
+      >> "$HOME/.mnemyx/exit-codes.log" 2>/dev/null
+  fi
+  return "$code"
+}
+autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _mnemyx_precmd
+```
+
+Verify with `true; false; tail -n 2 ~/.mnemyx/exit-codes.log` (one `"exit": 0`, one `"exit": 1`).
+
+**Semantic search (local ONNX).** `Xenova/all-MiniLM-L6-v2` int8-quantized (384 dims) embeds commands to SQLite BLOBs; cosine similarity ranks them. The server serves immediately on the keyword path while missing rows embed in the background. Vectors are tagged with the exact model id, so switching models later prunes and re-embeds automatically. One constant (`EMBEDDING_DTYPE: "q8"` → `"fp32"`) scales quality up.
+
+## Configuration
+
+`~/.mnemyx/config.json` is optional — missing file means built-ins. Read fresh on every call, so edits apply without restarts:
+
+```json
+{
+  "denylist": ["vim", "nano", "htop"],
+  "embeddings": true,
+  "exitCodes": true,
+  "maxHistoryAgeDays": 365
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `denylist` | 16 built-ins (`ls`, `cd`, `clear`, …) | Extra noise commands, *added to* the built-ins (first-word match, case-insensitive) |
+| `embeddings` | `true` | `false` = pure keyword search, model never loads |
+| `exitCodes` | `true` | `false` = ignore the exit-code log entirely (doesn't uninstall the shell snippet) |
+| `maxHistoryAgeDays` | `null` (unlimited) | Only index commands newer than N days. Filters newly parsed entries; never deletes existing rows |
+
+`mnemyx status` prints the effective configuration plus DB/hook/model health without changing anything.
+
+## Privacy: what's stored where, what never happens
+
+- **Nothing leaves your machine. No telemetry, no cloud calls, no accounts, no API keys — ever.** The strongest guarantee is architectural: there is no networking code in this project.
+- Shell history stays yours: it's read from your home directory into a local SQLite DB and only ever served back to the MCP client running on the same machine.
+- On-disk footprint (measured): `node_modules` ~550 MB (almost entirely the ONNX runtime's multi-platform binaries — install-time only), model weights ~23 MB in `~/.cache/mnemyx/models` (override with `HF_HOME`; deliberately outside `node_modules` so reinstalls never re-download), SQLite DB ~3 MB for ~2000 commands in `~/.local/share/mnemyx/mnemyx.db` (Linux; `~/Library/Application Support/mnemyx/` on macOS), config + exit log in `~/.mnemyx/`.
+- The model downloads once (~23 MB) on first semantic use, then works offline indefinitely. The exit-code log is append-only JSON lines; truncate it anytime (outcomes just return to unknown until commands re-run).
+
+## Contributing
+
+```bash
+bun install          # deps (Bun only — never npm/yarn)
+bunx tsc --noEmit    # must be clean before any PR
+bun run src/cli.ts status   # health check against your real data
+```
+
+- Runtime is Bun; storage is `bun:sqlite` (no `better-sqlite3`, no native compilation); MCP over stdio only.
+- Scope: macOS/Linux, bash/zsh. Out of scope unless explicitly revisited: Windows/PowerShell/fish/WSL, cloud sync, telemetry, embeddings that need a network call at query time.
+- Every phase must stay shippable alone: new behavior degrades to old behavior when its input is absent (no hook log → Phase 2 results; no model → keyword search; no history file → skip, never crash).
+- stdout belongs to the MCP transport in `src/index.ts` — log to stderr only.
+- Test against real history in an isolated way: point `HOME` at a temp dir for import tests, use temp DB paths via `initDb(path)`, never commit `*.db*` files.
 
 ## Project layout
 
 ```text
 src/
-  config.ts           # denylist + embeddings flag, ~/.mnemyx/config.json loader
-  db.ts               # bun:sqlite schema, FTS5 index, vector store, ranked search, exit codes
-  embeddings.ts       # local ONNX embedder, backfill, cosine search
-  exitLog.ts          # ~/.mnemyx/exit-codes.log path + tolerant JSONL parser
-  historyParser.ts  # zsh + bash parsers + auto-detect merge
-  index.ts          # MCP stdio server: startup import + 2 tools
+  index.ts          # MCP stdio server: import pipeline + search_history / get_recent_commands
+  cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
+  import.ts         # the one shared import pipeline (server and CLI both use it)
+  db.ts             # bun:sqlite schema + migrations, FTS5 index, vector store, ranked search
+  historyParser.ts  # zsh extended + bash plain parsers, dedupe, auto-detect merge
+  exitLog.ts        # exit-code log path + tolerant JSONL parser
+  embeddings.ts     # local ONNX embedder, background backfill, cosine search
+  config.ts         # ~/.mnemyx/config.json loader (denylist, embeddings, exitCodes, max age)
 ```
 
-## Non-goals (later phases)
-
-- Phase 5: full config file, `mnemyx init` CLI, npm publish
-- Any networking, cloud sync, or telemetry
+License: MIT — see [LICENSE](LICENSE).

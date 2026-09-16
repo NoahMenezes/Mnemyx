@@ -10,6 +10,7 @@ import {
   getCommandsByIds,
   sortByOutcomeTier,
   applyDenylist,
+  clampLimit,
   type CommandRow,
 } from "./db.ts";
 import { loadConfig, firstToken } from "./config.ts";
@@ -18,7 +19,7 @@ import { loadConfig, firstToken } from "./config.ts";
 // Phase 4: local semantic search. all-MiniLM-L6-v2 (int8 quantized, 384
 // dims) runs fully on-device via ONNX — no cloud, no API keys, no daemon.
 //
-// Cost (one-time): ~23MB model download to ~/.cache/huggingface on first
+// Cost (one-time): ~23MB model download to ~/.cache/mnemyx/models on first
 // use (offline after that), ~350MB of npm packages (mostly the ONNX
 // runtime's multi-platform binaries), ~3MB of vectors for ~2000 commands,
 // ~100-200MB RAM while embedding.
@@ -179,7 +180,7 @@ export async function semanticSearch(
     score: dot(queryVec, c.embedding),
   }));
   scored.sort((a, b) => b.score - a.score);
-  const wanted = opts.limit ?? 20;
+  const wanted = clampLimit(opts.limit, 20);
   const topIds = scored.slice(0, Math.min(wanted * 3 + 10, 500)).map((s) => s.id);
   const byId = new Map(getCommandsByIds(topIds).map((r) => [r.id, r]));
   // Preserve score order (byId lookup loses it), drop any missing rows.

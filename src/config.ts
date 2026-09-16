@@ -3,8 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Local config. Phase 2: noise denylist. Phase 4: embeddings on/off.
-// (Phase 5 will grow this file with more keys — the path stays the same.)
+// Local config (~/.mnemyx/config.json). Phase 2: denylist. Phase 4:
+// embeddings on/off. Phase 5: exit-code reading on/off + max history age.
 //
 // The file is OPTIONAL. If missing or unreadable we silently use the
 // built-ins. A user `denylist` array EXTENDS the built-ins (union,
@@ -12,7 +12,12 @@ import { join } from "node:path";
 // accidentally un-filter everything else.
 //
 // Example ~/.mnemyx/config.json:
-//   { "denylist": ["vim", "nano", "htop"], "embeddings": false }
+//   {
+//     "denylist": ["vim", "nano", "htop"],
+//     "embeddings": true,
+//     "exitCodes": true,
+//     "maxHistoryAgeDays": 365
+//   }
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_DENYLIST: string[] = [
@@ -40,6 +45,18 @@ export interface MnemyxConfig {
   denylist: string[];
   /** Phase 4: false disables semantic search entirely (pure FTS5). Default true. */
   embeddings: boolean;
+  /**
+   * Phase 5: false makes the server ignore the exit-code log entirely.
+   * Default true. Note this only stops READING — to stop the shell writing
+   * the log, remove the hook snippet from your rc file (see README).
+   */
+  exitCodes: boolean;
+  /**
+   * Phase 5: only index commands newer than this many days (unix-timestamp
+   * cutoff applied at import). null/omitted = no limit (default). Existing
+   * DB rows are never deleted — it only filters newly parsed entries.
+   */
+  maxHistoryAgeDays: number | null;
 }
 
 export function getConfigPath(): string {
@@ -54,11 +71,15 @@ export function loadConfig(
 ): MnemyxConfig {
   const denied = new Set(DEFAULT_DENYLIST);
   let embeddings = true;
+  let exitCodes = true;
+  let maxHistoryAgeDays: number | null = null;
   if (existsSync(configPath)) {
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
         denylist?: unknown;
         embeddings?: unknown;
+        exitCodes?: unknown;
+        maxHistoryAgeDays?: unknown;
       };
       if (Array.isArray(raw.denylist)) {
         for (const item of raw.denylist) {
@@ -78,13 +99,34 @@ export function loadConfig(
           `[mnemyx] ignoring malformed "embeddings" in ${configPath} (expected boolean)`
         );
       }
+      if (typeof raw.exitCodes === "boolean") {
+        exitCodes = raw.exitCodes;
+      } else if (raw.exitCodes !== undefined) {
+        console.error(
+          `[mnemyx] ignoring malformed "exitCodes" in ${configPath} (expected boolean)`
+        );
+      }
+      if (
+        typeof raw.maxHistoryAgeDays === "number" &&
+        Number.isFinite(raw.maxHistoryAgeDays) &&
+        raw.maxHistoryAgeDays >= 0
+      ) {
+        maxHistoryAgeDays = Math.floor(raw.maxHistoryAgeDays);
+      } else if (
+        raw.maxHistoryAgeDays !== undefined &&
+        raw.maxHistoryAgeDays !== null
+      ) {
+        console.error(
+          `[mnemyx] ignoring malformed "maxHistoryAgeDays" in ${configPath} (expected non-negative number or null)`
+        );
+      }
     } catch (err) {
       console.error(
         `[mnemyx] ignoring unreadable config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
-  return { denylist: [...denied], embeddings };
+  return { denylist: [...denied], embeddings, exitCodes, maxHistoryAgeDays };
 }
 
 // First whitespace-separated token, lowercased — the "command name".

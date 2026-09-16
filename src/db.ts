@@ -226,6 +226,11 @@ export function insertCommand(entry: HistoryEntry): void {
 
 // Bulk insert inside a single transaction. History files are thousands of
 // rows; one txn is ~100x faster than autocommit-per-row.
+//
+// Counting subtlety (same family as applyExitCodes): the commands_ai FTS
+// trigger fires per row and inflates sqlite changes() ~3x, so the added
+// count comes from a before/after row count inside the same transaction
+// instead of trusting per-statement change counts.
 export function bulkInsert(entries: HistoryEntry[]): number {
   const database = getDb();
   const stmt = database.query(
@@ -233,19 +238,19 @@ export function bulkInsert(entries: HistoryEntry[]): number {
        (command, timestamp, source_file, shell, is_approximate_timestamp)
      VALUES (?, ?, ?, ?, ?)`
   );
+  const countAll = database.query(`SELECT COUNT(*) AS n FROM commands;`);
   const insertMany = database.transaction((rows: HistoryEntry[]) => {
-    let added = 0;
+    const before = (countAll.get() as { n: number }).n;
     for (const e of rows) {
-      const res = stmt.run(
+      stmt.run(
         e.command,
         e.timestamp,
         e.sourceFile,
         e.shell,
         e.timestampApproximate ? 1 : 0
       );
-      added += Number(res.changes);
     }
-    return added;
+    return (countAll.get() as { n: number }).n - before;
   });
   return insertMany(entries);
 }
@@ -409,7 +414,8 @@ export function sortByOutcomeTier(rows: CommandRow[]): CommandRow[] {
   return [...rows].sort((a, b) => tier(a) - tier(b));
 }
 
-// Format rows for an LLM to read: newest first, with date, shell, provenance.
+// Format rows for an LLM to read, in the caller's relevance order, with
+// date, shell, and provenance.
 // Phase 3 adds the outcome signal: [exit 0] worked, [exit N] failed, and no
 // marker means unknown (pre-hook history) — unknown is not failure.
 export function formatRows(rows: CommandRow[]): string {
