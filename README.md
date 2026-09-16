@@ -33,8 +33,8 @@ bunx tsc --noEmit
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `search_history` | `query: string`, `limit?: number` (default 20, max 100) | Full-text ranked keyword search, most relevant first; noise commands filtered |
-| `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, for general context (noise filtered) |
+| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false) | Full-text ranked keyword search; proven successes (exit 0) rank first, annotated `[exit N]` |
+| `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, for general context (noise filtered, outcomes annotated) |
 
 Example — "have I fixed this docker error before?":
 
@@ -70,6 +70,70 @@ Each result is tagged with `source_file` **and** `shell` so you can see provenan
   Your entries are *added to* the built-ins, never replace them. Edits take effect immediately, no restart needed.
 - **Consecutive de-duplication**: identical back-to-back commands within one history file are collapsed to one row at import time (`ls` × 5 keeps a single entry).
 
+## Outcome signal (Phase 3) — optional shell hook
+
+Search hits can now tell "I tried this" from "this actually worked". Each command may carry its exit code: `[exit 0]` worked, `[exit 1]` failed, no marker means unknown (all history from before you install the hook — unknown is *not* failure). Ranking puts proven successes first, unknowns next, failures last; pass `only_successful: true` to see *only* proven exit-0 commands.
+
+This requires a tiny shell hook that logs each command's exit code to `~/.mnemyx/exit-codes.log` (local JSON lines, one per command). **It is strictly opt-in — Mnemyx never touches your shell config.** Without the log file everything behaves exactly as Phase 2.
+
+**Setup (2 minutes):**
+
+1. Prerequisites: `python3` on your PATH (preinstalled on macOS and most Linux distros), then:
+   ```bash
+   mkdir -p ~/.mnemyx
+   ```
+2. Append **one** of these blocks to your rc file:
+
+   zsh (`~/.zshrc`):
+   ```sh
+   # --- Mnemyx (optional): log each command's exit code locally for shell-history search.
+   # Appends JSON lines to ~/.mnemyx/exit-codes.log. Nothing leaves your machine.
+   # Remove this block to disable.
+   _mnemyx_precmd() {
+     local code=$?
+     local cmd
+     cmd=$(fc -ln -1 2>/dev/null | sed -e 's/^[[:space:]]*//')
+     if [ -n "$cmd" ]; then
+       MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" python3 -c \
+         'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"]}))' \
+         >> "$HOME/.mnemyx/exit-codes.log" 2>/dev/null
+     fi
+     return "$code"
+   }
+   autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _mnemyx_precmd
+   ```
+
+   bash (`~/.bashrc`):
+   ```sh
+   # --- Mnemyx (optional): log each command's exit code locally for shell-history search.
+   # Appends JSON lines to ~/.mnemyx/exit-codes.log. Nothing leaves your machine.
+   # Remove this block (and the PROMPT_COMMAND entry) to disable.
+   _mnemyx_prompt() {
+     local code=$?
+     local cmd
+     cmd=$(history 1 2>/dev/null | sed -e 's/^[[:space:]]*[0-9]*[[:space:]]*//')
+     if [ -n "$cmd" ]; then
+       MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" python3 -c \
+         'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"]}))' \
+         >> "$HOME/.mnemyx/exit-codes.log" 2>/dev/null
+     fi
+     return "$code"
+   }
+   if [[ "${PROMPT_COMMAND:-}" != *"_mnemyx_prompt"* ]]; then
+     PROMPT_COMMAND="_mnemyx_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+   fi
+   ```
+
+3. Reload (`source ~/.zshrc`, or open a new terminal), then verify:
+   ```bash
+   true; false; tail -n 2 ~/.mnemyx/exit-codes.log
+   ```
+   You should see two JSON lines, one with `"exit": 0`, one with `"exit": 1`.
+4. Restart the MCP server (it re-imports on every launch). Its stderr will report e.g. `exit codes: 12 distinct commands logged, 30 history rows annotated`.
+5. Search: hits for logged commands now show `[exit 0]` / `[exit 1]`; try `only_successful: true` to filter to proven fixes.
+
+Semantics to know: matching is by exact command text, and a command keeps its **most recent** observed exit code. Re-imports are idempotent. The log is append-only (no rotation yet — a few KB per thousand commands; safe to truncate anytime, worst case outcomes return to unknown until commands re-run).
+
 ## Register with Claude Code
 
 ```bash
@@ -104,14 +168,14 @@ Re-imports are idempotent (`INSERT OR IGNORE` on `(command, timestamp, source_fi
 ```text
 src/
   config.ts           # denylist defaults + ~/.mnemyx/config.json loader
-  db.ts               # bun:sqlite schema, FTS5 index, ranked search, formatting
+  db.ts               # bun:sqlite schema, FTS5 index, ranked search, exit codes, formatting
+  exitLog.ts          # ~/.mnemyx/exit-codes.log path + tolerant JSONL parser
   historyParser.ts  # zsh + bash parsers + auto-detect merge
   index.ts          # MCP stdio server: startup import + 2 tools
 ```
 
 ## Non-goals (later phases)
 
-- Phase 3: exit-code capture via shell hooks (`exit_code` column)
 - Phase 4: local embeddings for semantic search (FTS5 remains as fallback)
 - Phase 5: full config file, `mnemyx init` CLI, npm publish
 - Any networking, cloud sync, or telemetry

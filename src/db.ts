@@ -22,6 +22,12 @@ export interface HistoryEntry {
 // A row read back out of the `commands` table.
 export interface CommandRow extends HistoryEntry {
   id: number;
+  /**
+   * Phase 3: this command's own exit code (0 = worked), from the opt-in
+   * shell hook log. NULL = unknown (all pre-hook history, or hook not
+   * installed). Unknown is NOT failure — it just means "no signal".
+   */
+  exitCode: number | null;
 }
 
 let db: Database | null = null;
@@ -54,6 +60,7 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
       source_file TEXT NOT NULL,
       shell TEXT NOT NULL,
       is_approximate_timestamp INTEGER NOT NULL DEFAULT 0,
+      exit_code INTEGER,
       UNIQUE(command, timestamp, source_file)
     );
   `);
@@ -69,6 +76,11 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
     db.run(
       `ALTER TABLE commands RENAME COLUMN timestamp_approximate TO is_approximate_timestamp;`
     );
+  }
+  // Phase 3: nullable outcome column. ALTER TABLE preserves every existing
+  // row (all pre-hook history simply reads back as NULL = unknown).
+  if (!colNames.includes("exit_code")) {
+    db.run(`ALTER TABLE commands ADD COLUMN exit_code INTEGER;`);
   }
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_commands_command ON commands(command);`
@@ -156,14 +168,18 @@ function escapeLike(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
-function rowToEntry(row: {
+// Raw row shape as returned by bun:sqlite (snake_case, nullable exit_code).
+interface DbRow {
   id: number;
   command: string;
   timestamp: number;
   source_file: string;
   shell: string;
   is_approximate_timestamp: number;
-}): CommandRow {
+  exit_code: number | null;
+}
+
+function rowToEntry(row: DbRow): CommandRow {
   return {
     id: row.id,
     command: row.command,
@@ -171,6 +187,7 @@ function rowToEntry(row: {
     sourceFile: row.source_file,
     shell: row.shell as SupportedShell,
     timestampApproximate: row.is_approximate_timestamp === 1,
+    exitCode: row.exit_code,
   };
 }
 
@@ -253,69 +270,122 @@ function fetchSize(wanted: number): number {
   return Math.min(wanted * 3 + 10, 500);
 }
 
+export interface SearchOptions {
+  limit?: number;
+  /**
+   * Phase 3: when true, return only rows with a proven exit_code of 0.
+   * Rows with unknown outcomes (NULL — all pre-hook history) are excluded,
+   * because "unknown" is not "worked". Default false (full recall).
+   */
+  onlySuccessful?: boolean;
+}
+
+// Outcome tier for ranking: proven successes first, unknowns next, proven
+// failures last. This is the "boost": gentle and progressive — on a DB with
+// no hook data every row is tier 1 and ordering is exactly Phase 2's.
+function outcomeTier(alias: string): string {
+  return `CASE WHEN ${alias}.exit_code = 0 THEN 0 WHEN ${alias}.exit_code IS NULL THEN 1 ELSE 2 END`;
+}
+
 export function searchCommands(
   query: string,
-  limit?: number
+  limitOrOptions?: number | SearchOptions
 ): CommandRow[] {
+  const opts: SearchOptions =
+    typeof limitOrOptions === "number"
+      ? { limit: limitOrOptions }
+      : (limitOrOptions ?? {});
   const trimmed = query.trim();
   if (!trimmed) return [];
-  const wanted = clampLimit(limit, 20);
+  const wanted = clampLimit(opts.limit, 20);
+  const successFilter = opts.onlySuccessful === true;
   const match = buildFtsMatch(trimmed);
-  let rows: {
-    id: number;
-    command: string;
-    timestamp: number;
-    source_file: string;
-    shell: string;
-    is_approximate_timestamp: number;
-  }[];
+  let rows: DbRow[];
   if (match === null) {
     rows = getDb()
       .query(
-        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp
+        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code
          FROM commands
          WHERE command LIKE '%' || ? || '%' ESCAPE '\\'
-         ORDER BY timestamp DESC
+           ${successFilter ? "AND exit_code = 0" : ""}
+         ORDER BY ${outcomeTier("commands")}, timestamp DESC
          LIMIT ?`
       )
-      .all(escapeLike(trimmed), fetchSize(wanted)) as typeof rows;
+      .all(escapeLike(trimmed), fetchSize(wanted)) as DbRow[];
   } else {
     rows = getDb()
       .query(
-        `SELECT c.id, c.command, c.timestamp, c.source_file, c.shell, c.is_approximate_timestamp
+        `SELECT c.id, c.command, c.timestamp, c.source_file, c.shell, c.is_approximate_timestamp, c.exit_code
          FROM commands_fts f JOIN commands c ON c.id = f.rowid
          WHERE commands_fts MATCH ?
-         ORDER BY rank
+           ${successFilter ? "AND c.exit_code = 0" : ""}
+         ORDER BY ${outcomeTier("c")}, rank
          LIMIT ?`
       )
-      .all(match, fetchSize(wanted)) as typeof rows;
+      .all(match, fetchSize(wanted)) as DbRow[];
   }
   return applyDenylist(rows.map(rowToEntry), wanted);
 }
 
 // Most recent commands, no query needed — useful for general context.
 // Denylist applies here too (recents full of `ls`/`cd` help nobody).
+// Chronological order is kept (no outcome reordering here); exit codes
+// show up as annotations via formatRows.
 export function getRecentCommands(limit?: number): CommandRow[] {
   const wanted = clampLimit(limit, 10);
   const rows = getDb()
     .query(
-      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp
+      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code
        FROM commands
        ORDER BY timestamp DESC
        LIMIT ?`
     )
-    .all(fetchSize(wanted)) as {
-    id: number;
-    command: string;
-    timestamp: number;
-    source_file: string;
-    shell: string;
-    is_approximate_timestamp: number;
-  }[];
+    .all(fetchSize(wanted)) as DbRow[];
   return applyDenylist(rows.map(rowToEntry), wanted);
 }
 
+// Phase 3: stamp hook-observed outcomes onto matching history rows.
+// Matching is by exact command text; every row with that text gets the
+// LATEST observed exit code (the map is already last-wins). Runs in one
+// transaction; returns the number of rows updated. Re-running with the
+// same log is a true no-op (rows already carrying the value are skipped,
+// so the FTS sync triggers don't churn either).
+//
+// Counting subtlety: the commands_au FTS trigger fires on every UPDATE,
+// which inflates sqlite changes() — so we count rows-to-change with a
+// SELECT first instead of trusting the UPDATE's change count.
+export function applyExitCodes(
+  outcomes: Map<string, { exit: number }>
+): number {
+  if (outcomes.size === 0) return 0;
+  const database = getDb();
+  const pendingStmt = database.query(
+    `SELECT COUNT(*) AS n FROM commands WHERE command = ? AND (exit_code IS NULL OR exit_code != ?)`
+  );
+  const updateStmt = database.query(
+    `UPDATE commands SET exit_code = ? WHERE command = ? AND (exit_code IS NULL OR exit_code != ?)`
+  );
+  const applyMany = database.transaction(
+    (entries: [string, { exit: number }][]): number => {
+      let updated = 0;
+      for (const [command, outcome] of entries) {
+        const pending = (
+          pendingStmt.get(command, outcome.exit) as { n: number }
+        ).n;
+        if (pending > 0) {
+          updateStmt.run(outcome.exit, command, outcome.exit);
+          updated += pending;
+        }
+      }
+      return updated;
+    }
+  );
+  return applyMany([...outcomes.entries()]);
+}
+
 // Format rows for an LLM to read: newest first, with date, shell, provenance.
+// Phase 3 adds the outcome signal: [exit 0] worked, [exit N] failed, and no
+// marker means unknown (pre-hook history) — unknown is not failure.
 export function formatRows(rows: CommandRow[]): string {
   if (rows.length === 0) {
     return "No matching commands found in shell history.";
@@ -324,7 +394,8 @@ export function formatRows(rows: CommandRow[]): string {
     .map((r, i) => {
       const date = new Date(r.timestamp * 1000).toISOString();
       const approx = r.timestampApproximate ? " (approx. time)" : "";
-      return `${i + 1}. [${date}${approx}] [${r.shell}] ${r.command}\n   source: ${r.sourceFile}`;
+      const outcome = r.exitCode === null ? "" : ` [exit ${r.exitCode}]`;
+      return `${i + 1}. [${date}${approx}] [${r.shell}]${outcome} ${r.command}\n   source: ${r.sourceFile}`;
     })
     .join("\n");
 }
