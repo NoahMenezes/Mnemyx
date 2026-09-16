@@ -278,11 +278,38 @@ test("fresh DB files are owner-only; concurrent writers wait (busy_timeout)", as
 
 test("NFD input normalizes to NFC so macOS filenames match queries", () => {
   initDb(dbPath());
-  const nfd = "café".normalize("NFD");
+  const nfd = "café".normalize("NFD");
   expect(nfd).not.toBe("café");
   bulkInsert([entry(`open ${nfd}`, 1)]);
   // NFC query finds the NFD-stored command.
   expect(searchCommands("café", 10).map((r) => r.command)).toEqual([
     "open café",
+  ]);
+});
+
+test("initDb converges pre-normalization NFD rows (update or drop+carry)", () => {
+  const p = dbPath();
+  const raw = new Database(p);
+  raw.run(
+    "CREATE TABLE commands (id INTEGER PRIMARY KEY AUTOINCREMENT, command TEXT NOT NULL, timestamp INTEGER NOT NULL, source_file TEXT NOT NULL, shell TEXT NOT NULL, is_approximate_timestamp INTEGER NOT NULL DEFAULT 0, exit_code INTEGER, UNIQUE(command, timestamp, source_file));"
+  );
+  const nfd = "café".normalize("NFD");
+  const ins = raw.query(
+    "INSERT INTO commands (command, timestamp, source_file, shell, is_approximate_timestamp, exit_code) VALUES (?, ?, 'f', 'zsh', 0, ?)"
+  );
+  ins.run(`solo ${nfd}`, 1, 2); // lone NFD row -> updated in place
+  ins.run(`twin ${nfd}`, 2, 0); // NFD row with NFC twin -> dropped, exit carried
+  ins.run("twin café", 2, null);
+  raw.close();
+  initDb(p);
+  const v = new Database(p, { readonly: true });
+  const rows = v.query(
+    "SELECT command, exit_code FROM commands ORDER BY id;"
+  ).all() as { command: string; exit_code: number | null }[];
+  v.close();
+  closeDb();
+  expect(rows).toEqual([
+    { command: "solo café", exit_code: 2 },
+    { command: "twin café", exit_code: 0 },
   ]);
 });

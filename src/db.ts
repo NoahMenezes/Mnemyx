@@ -127,7 +127,7 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
     const dirty = rows.filter((r) => r.command !== r.command.normalize("NFC"));
     if (dirty.length > 0) {
       const twinStmt = db.query(
-        `SELECT id, exit_code FROM commands WHERE command = ? AND timestamp = ? AND source_file = ? AND id != ? LIMIT 1`
+        `SELECT id, exit_code FROM commands WHERE command = ? AND timestamp = ? AND source_file = ? LIMIT 1`
       );
       const carryStmt = db.query(`UPDATE commands SET exit_code = ? WHERE id = ?`);
       const fixStmt = db.query(`UPDATE commands SET command = ? WHERE id = ?`);
@@ -135,7 +135,7 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
       const converge = db.transaction(() => {
         for (const r of dirty) {
           const nfc = r.command.normalize("NFC");
-          const twin = twinStmt.get(nfc, r.timestamp, r.sourceFile) as {
+          const twin = twinStmt.get(nfc, r.timestamp, r.source_file) as {
             id: number;
             exit_code: number | null;
           } | null;

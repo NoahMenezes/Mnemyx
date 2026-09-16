@@ -80,6 +80,8 @@ Restart Claude Desktop afterwards.
 | macOS Apple Silicon | Full | Expected full — needs a field report, fallback covers |
 | macOS Intel | Full | Keyword only — upstream ships no `darwin/x64` ONNX binary and the Node build rejects WASM devices, so there is nothing to load. The server detects this and serves keyword results |
 
+> On Linux arm64 / Apple Silicon: binaries are bundled so full support is expected, but we haven't run it there yet — if you do, please file an issue with your `mnemyx status` output and `uname -m`.
+
 Notes:
 - macOS ships bash 3.2 and zsh 5.x — the hook snippets use only constructs legal in both (verified). `python3` is required for the hook: on a fresh Mac the first `python3` run pops a Command Line Tools install dialog (accept it once, or `brew install python3`); `mnemyx init` probes this and warns.
 - The hook adds ~40 ms of prompt latency (measured: one `python3` spawn per command). Remove the snippet to disable; nothing else changes.
@@ -185,7 +187,7 @@ Design notes: the DB keeps true text (so you can still *find* "the deploy using 
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 50 tests, hermetic (temp DBs/configs, stubbed model) — must be green
+bun test             # 58 tests, hermetic (temp DBs/configs, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
