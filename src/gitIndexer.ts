@@ -229,7 +229,14 @@ export function getCommitGraph(repoPath: string, limit = 15): string | null {
       out.length > MAX_GRAPH_CHARS
         ? out.slice(0, MAX_GRAPH_CHARS) + "\n… [truncated]"
         : out;
-    return redactGitOutput(cut);
+    // Plain fence (no language): graph glyphs must not recolor as diff.
+    // The [redacted] meta-note (if any) stays OUTSIDE the fence.
+    const masked = redactGitOutput(cut);
+    const noteIdx = masked.lastIndexOf(`\n(${REDACTED}:`);
+    if (noteIdx >= 0) {
+      return ["```", masked.slice(0, noteIdx), "```", masked.slice(noteIdx + 1)].join("\n");
+    }
+    return ["```", masked, "```"].join("\n");
   } catch {
     return null;
   }
@@ -384,9 +391,30 @@ export function getCommitDiff(
     return r.text;
   };
   let maskedLines = 0;
+  // Changed-file table: tree glyphs + aligned counts, like a review's
+  // file list. Display path prefers the new (b/) side.
+  const shown = shownFiles.slice(0, maxFiles);
+  const nameOf = (header: string): string => {
+    const parts = header.split(/\s+/);
+    const b = parts.find((p) => p.startsWith("b/"));
+    const a = parts.find((p) => p.startsWith("a/"));
+    const pick = b ?? a ?? parts[parts.length - 1] ?? header;
+    return pick.replace(/^[ab]\//, "");
+  };
+  const nameWidth = Math.max(...shown.map((f) => nameOf(f.header).length));
   const out: string[] = [
     `diff ${h.slice(0, 7)} (${shownFiles.length} file${shownFiles.length === 1 ? "" : "s"}, +${totalAdded} −${totalDeleted})`,
   ];
+  shown.forEach((f, i) => {
+    const glyph = i === shown.length - 1 && shownFiles.length <= maxFiles ? "└──" : "├──";
+    out.push(`${glyph} ${nameOf(f.header).padEnd(nameWidth)} +${f.added} −${f.deleted}`);
+  });
+  if (shownFiles.length > maxFiles) {
+    out.push(`… and ${shownFiles.length - maxFiles} more files (narrow with file=)`);
+  }
+  // Fenced body: `diff` tag makes every client color +/- like a review.
+  // Meta lines (truncation, redaction) stay OUTSIDE the fence.
+  const body: string[] = [];
   let emitted = 0;
   let cutFiles = 0;
   let cutLines = 0;
@@ -397,13 +425,14 @@ export function getCommitDiff(
       cutLines += f.lines.length;
       continue;
     }
-    out.push(`--- ${f.header} | +${f.added} −${f.deleted}`);
+    body.push(`--- ${f.header} | +${f.added} −${f.deleted}`);
     for (const line of f.lines) {
       if (emitted >= maxLines) break;
-      out.push(mask(line));
+      body.push(mask(line));
       emitted++;
     }
   }
+  out.push("```diff", ...body, "```");
   // Exact remainder: content lines of shown files minus what we emitted.
   const totalLines = shownFiles
     .slice(0, maxFiles)
@@ -568,7 +597,8 @@ export function getFileHistory(
 }
 
 // One file's history rendered for an LLM: short hash, date, +A −D,
-// message — the file-level answer to "what changed here".
+// message — the file-level answer to "what changed here". Rows aligned
+// in a plain fence so dates and counts column-line up in monospace.
 export function formatFileHistory(
   repoPath: string,
   relPath: string,
@@ -577,9 +607,17 @@ export function formatFileHistory(
   if (entries.length === 0) {
     return `No history for ${relPath} in ${repoPath} (untracked, bad path, or not a repo).`;
   }
-  const lines = entries.map((e) => {
+  const addW = Math.max(...entries.map((e) => `+${e.added}`.length));
+  const delW = Math.max(...entries.map((e) => `−${e.deleted}`.length));
+  const rows = entries.map((e) => {
     const date = new Date(e.authorTs * 1000).toISOString().slice(0, 10);
-    return `- ${e.hash.slice(0, 7)} ${date} +${e.added} −${e.deleted} ${sanitizeForDisplay(e.message).slice(0, 200)}`;
+    const counts = `${`+${e.added}`.padEnd(addW)} ${`−${e.deleted}`.padEnd(delW)}`;
+    return `${e.hash.slice(0, 7)} ${date} ${counts} ${sanitizeForDisplay(e.message).slice(0, 200)}`;
   });
-  return [`history of ${relPath} (${entries.length} commits, newest first):`, ...lines].join("\n");
+  return [
+    `history of ${relPath} (${entries.length} commits, newest first):`,
+    "```",
+    ...rows,
+    "```",
+  ].join("\n");
 }

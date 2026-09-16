@@ -81,22 +81,34 @@ export function formatCommitStory(
   const date = new Date(commit.authorTs * 1000).toISOString();
   const files =
     commit.filesChanged.length > 0
-      ? commit.filesChanged.join(", ")
-      : "(file list unavailable)";
+      ? commit.filesChanged
+          .slice(0, 5)
+      .map((f, i, arr) =>
+        i === arr.length - 1
+          ? `  └── ${sanitizeForDisplay(f)}`
+          : `  ├── ${sanitizeForDisplay(f)}`
+      )
+          .concat(
+            commit.filesChanged.length > 5
+              ? [`  … and ${commit.filesChanged.length - 5} more`]
+              : []
+          )
+          .join("\n")
+      : "  (file list unavailable)";
   const head = [
-    `commit ${commit.hash.slice(0, 7)} (${commit.hash})`,
+    `## What changed — commit ${commit.hash.slice(0, 7)} (${commit.hash})`,
     `repo: ${commit.repoPath}`,
     `date: ${date}`,
     `message: ${sanitizeForDisplay(commit.message)}`,
-    `files: ${sanitizeForDisplay(files)}`,
+    `files:\n${files}`,
   ].join("\n");
-  const stat = diffStat !== null ? `\n\nDiff stat:\n${sanitizeForDisplay(diffStat)}` : "";
+  const stat = diffStat !== null ? `\n\n## Diff stat\n${sanitizeForDisplay(diffStat)}` : "";
   const preview =
     diffPreview !== null && diffPreview.trim() !== ""
-      ? `\n\nDiff:\n${diffPreview}`
+      ? `\n\n## Diff\n${diffPreview}`
       : "";
   if (commands.length === 0) {
-    return `${head}${stat}${preview}\n\nWhat I ran around then: no indexed commands in that window.`;
+    return `${head}${stat}${preview}\n\n## What I ran around then\nno indexed commands in that window.`;
   }
   const repoMatched = commands.some((c) => c.repo !== null && c.repo === commit.repoPath);
   const caveat = repoMatched
@@ -104,7 +116,7 @@ export function formatCommitStory(
     : "time-only match (no repo-tracked commands yet — upgrade the shell hook)";
   return (
     `${head}${stat}${preview}` +
-    `\n\nWhat I ran around then (${caveat}):\n${formatRows(commands)}`
+    `\n\n## What I ran around then (${caveat})\n${formatRows(commands)}`
   );
 }
 

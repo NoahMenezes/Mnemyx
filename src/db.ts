@@ -991,6 +991,7 @@ export function getCommandsInWindow(
 
 // One-line per commit, for LLM consumption. Messages sanitized like
 // commands (history-adjacent text can contain ANSI/control chars).
+// File lists render as a tree (like a review's file list), capped at 5.
 export function formatCommits(rows: GitCommit[]): string {
   if (rows.length === 0) {
     return "No matching commits found in indexed repos.";
@@ -999,12 +1000,18 @@ export function formatCommits(rows: GitCommit[]): string {
     .map((c) => {
       const date = new Date(c.authorTs * 1000).toISOString();
       const short = c.hash.slice(0, 7);
-      const files =
-        c.filesChanged.length > 0
-          ? ` (${c.filesChanged.slice(0, 5).join(", ")}${c.filesChanged.length > 5 ? ` +${c.filesChanged.length - 5} more` : ""})`
-          : "";
       const msg = sanitizeForDisplay(c.message).slice(0, 300);
-      return `- [${date}] ${short} ${msg}${files}\n  repo: ${c.repoPath}`;
+      const head = `- [${date}] ${short} ${msg}`;
+      const files = c.filesChanged.slice(0, 5);
+      const tree = files.map((f, i) =>
+        i === files.length - 1
+          ? `  └── ${sanitizeForDisplay(f)}`
+          : `  ├── ${sanitizeForDisplay(f)}`
+      );
+      if (c.filesChanged.length > 5) {
+        tree.push(`  … and ${c.filesChanged.length - 5} more`);
+      }
+      return [`${head}`, ...tree, `  repo: ${c.repoPath}`].join("\n");
     })
     .join("\n");
 }

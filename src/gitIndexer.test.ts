@@ -295,8 +295,7 @@ test("getRepoStatus labels staged/unstaged/untracked, clean when empty", () => {
   expect(getRepoStatus(join(dir, "missing"))).toBeNull();
 });
 
-test("getFileHistory lists commits newest-first with +A -D", () => {
-  const repo = join(dir, "histrepo");
+test("getFileHistory lists commits newest-first with +A -D", () => {  const repo = join(dir, "histrepo");
   mkdirSync(repo, { recursive: true });
   Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
   writeFileSync(join(repo, "f.txt"), "one\n");
@@ -315,4 +314,74 @@ test("getFileHistory lists commits newest-first with +A -D", () => {
   expect(getFileHistory(repo, "../evil.txt")).toEqual([]);
   expect(getFileHistory(repo, "missing.txt")).toEqual([]);
   expect(getFileHistory(join(dir, "missing"), "f.txt")).toEqual([]);
+});
+
+test("diff design: fenced body, file table with trees and counts", () => {
+  const { repo, hash } = makeDiffRepo("designrepo");
+  const diff = getCommitDiff(repo, hash) as string;
+  const lines = diff.split("\n");
+  // Summary + table outside the fence, body fenced exactly once.
+  expect(lines[0]).toMatch(/^diff [0-9a-f]{7} \(1 file, \+2 −1\)$/);
+  expect(lines[1]).toMatch(/^└── code\.txt\s+\+2 −1$/);
+  const fenceIdx = lines.map((l, i) => (l === "```diff" ? i : -1)).filter((i) => i >= 0);
+  const closeIdx = lines.map((l, i) => (l === "```" ? i : -1)).filter((i) => i >= 0);
+  expect(fenceIdx).toHaveLength(1);
+  expect(closeIdx).toHaveLength(1);
+  expect(closeIdx[0] as number).toBeGreaterThan(fenceIdx[0] as number);
+  // Hunk body inside the fence.
+  const body = lines.slice((fenceIdx[0] as number) + 1, closeIdx[0] as number).join("\n");
+  expect(body).toContain("@@");
+  expect(body).toContain("-two");
+  expect(body).toContain("+TWO");
+});
+
+test("diff design: truncation and redaction notes stay outside the fence", () => {
+  const repo = join(dir, "designbig");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "b.txt"), "x\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "base"], { cwd: repo, env: gitEnv() });
+  const big = Array.from({ length: 100 }, (_, i) => `line-${i}`).join("\n") + "\n";
+  writeFileSync(join(repo, "b.txt"), big);
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "big"], { cwd: repo, env: gitEnv() });
+  const hash = String(
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout
+  ).trim();
+  const diff = getCommitDiff(repo, hash, { maxLines: 10 }) as string;
+  const lines = diff.split("\n");
+  expect(lines[lines.length - 1]?.startsWith("```")).toBe(false);
+  expect(diff).toContain("… [truncated,");
+  const closeAt = lines.lastIndexOf("```");
+  const truncAt = lines.findIndex((l) => l.startsWith("… [truncated,"));
+  expect(closeAt).toBeGreaterThan(-1);
+  expect(truncAt).toBeGreaterThan(closeAt);
+});
+
+test("graph design: plain-fenced with redaction note outside", () => {
+  const { repo } = makeBranchRepo("designgraph");
+  const graph = getCommitGraph(repo, 10) as string;
+  const lines = graph.split("\n");
+  expect(lines[0]).toBe("```");
+  expect(lines[lines.length - 1]).toBe("```");
+  expect(graph).toContain("*");
+});
+
+test("file-history design: fenced aligned block", () => {
+  const repo = join(dir, "designhist");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "f.txt"), "one\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "add one"], { cwd: repo, env: gitEnv() });
+  writeFileSync(join(repo, "f.txt"), "one\ntwo\nthree\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "add two"], { cwd: repo, env: gitEnv() });
+  const entries = getFileHistory(repo, "f.txt", 10);
+  const text = formatFileHistory(repo, "f.txt", entries);
+  const lines = text.split("\n");
+  expect(lines[1]).toBe("```");
+  expect(lines[lines.length - 1]).toBe("```");
+  expect(text).toContain("+2");
 });

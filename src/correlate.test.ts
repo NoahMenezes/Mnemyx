@@ -69,10 +69,12 @@ test("formatCommitStory labels sections and handles empty window", () => {
   bulkInsert([cmd("deploy x", 999)]);
   const [row] = getCommandsNearCommit(commit(1000), 30);
   const full = formatCommitStory(commit(1000), row ? [row] : [], "stat here");
-  expect(full).toContain("Diff stat:");
+  expect(full).toContain("## Diff stat");
   expect(full).toContain("deploy x");
   // No repo-tracked rows yet → honest time-only caveat.
   expect(full).toContain("time-only match");
+  expect(full).toContain("## What changed");
+  expect(full).toContain("└── a.ts");
 });
 
 test("same-repo commands sort first and lift the caveat", () => {

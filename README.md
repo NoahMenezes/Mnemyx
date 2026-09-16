@@ -177,6 +177,12 @@ Usage examples (as you'd prompt your assistant):
 
 ```text
 diff b77d1e0 (5 files, +447 −4)
+├── README.md               +4  −1
+├── src/config.test.ts      +68 −0
+├── src/config.ts           +89 −3
+├── src/repoScanner.test.ts +109 −0
+└── src/repoScanner.ts      +177 −0
+```diff
 --- a/README.md b/README.md | +4 −1
 --- a/README.md
 +++ b/README.md
