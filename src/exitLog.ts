@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { requireHome } from "./config.ts";
+import { readTailWindow } from "./fsutil.ts";
 
 // ---------------------------------------------------------------------------
 // Phase 3: exit-code log written by the opt-in shell hook (see README).
@@ -17,6 +18,10 @@ import { requireHome } from "./config.ts";
 export function getExitLogPath(): string {
   return join(requireHome(), ".mnemyx", "exit-codes.log");
 }
+
+// Same unbounded-growth guard as history files: the log is append-only and
+// never rotated by the hook, so cap the parse window (tail wins).
+export const MAX_EXIT_LOG_BYTES = 8 * 1024 * 1024;
 
 export interface ExitRecord {
   /** Exact command text, as captured by the hook. */
@@ -35,12 +40,10 @@ export function parseExitLog(
 ): Map<string, ExitRecord> {
   const outcomes = new Map<string, ExitRecord>();
   if (!existsSync(logPath)) return outcomes;
-  let raw: string;
-  try {
-    raw = readFileSync(logPath, "utf8");
-  } catch (err) {
+  const raw = readTailWindow(logPath, MAX_EXIT_LOG_BYTES);
+  if (raw === null) {
     console.error(
-      `[mnemyx] ignoring unreadable exit-code log at ${logPath}: ${err instanceof Error ? err.message : String(err)}`
+      `[mnemyx] ignoring unreadable exit-code log at ${logPath}`
     );
     return outcomes;
   }

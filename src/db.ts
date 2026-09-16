@@ -72,6 +72,13 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
   // Concurrent writers (server + `mnemyx init` at once) wait instead of
   // throwing SQLITE_BUSY immediately.
   db.run("PRAGMA busy_timeout = 5000;");
+  // Measured wins on the bench (10k rows: bulk import ~1.5s -> ~0.43s,
+  // 3.5x): NORMAL is crash-safe under WAL, bigger page cache + memory temp
+  // store cut FTS-trigger write amplification. Re-measure with
+  // `mnemyx bench` before touching these.
+  db.run("PRAGMA synchronous = NORMAL;");
+  db.run("PRAGMA cache_size = -64000;");
+  db.run("PRAGMA temp_store = MEMORY;");
   try {
     db.run("PRAGMA journal_mode = WAL;");
   } catch {
@@ -403,6 +410,11 @@ export interface SearchOptions {
   onlySuccessful?: boolean;
 }
 
+// Hardening: bound the work any single query can trigger. FTS already caps
+// at 10 tokens and the embedder would happily chew megabytes, so overlong
+// queries are rejected up front (both search paths share this).
+export const MAX_QUERY_LENGTH = 500;
+
 // Outcome tier for ranking: proven successes first, unknowns next, proven
 // failures last. This is the "boost": gentle and progressive — on a DB with
 // no hook data every row is tier 1 and ordering is exactly Phase 2's.
@@ -420,6 +432,11 @@ export function searchCommands(
       : (limitOrOptions ?? {});
   const trimmed = query.trim();
   if (!trimmed) return [];
+  if (trimmed.length > MAX_QUERY_LENGTH) {
+    throw new Error(
+      `query too long (${trimmed.length} chars, max ${MAX_QUERY_LENGTH})`
+    );
+  }
   const wanted = clampLimit(opts.limit, 20);
   const successFilter = opts.onlySuccessful === true;
   const match = buildFtsMatch(trimmed);
@@ -522,6 +539,24 @@ export function sortByOutcomeTier(rows: CommandRow[]): CommandRow[] {
 // marker means unknown (pre-hook history) — unknown is not failure.
 // Step 2 redacts secrets on output (store raw, display masked): masked hits
 // carry a [redacted] tag so the reader knows something was hidden.
+// Hardening: tool output flows straight into LLM prompts AND terminal UIs,
+// so command text is sanitized (ANSI escapes/control chars stripped — a
+// history line could otherwise inject terminal sequences or prompt text)
+// and truncated (a single pathological entry can't blow up context).
+export const MAX_COMMAND_DISPLAY_LENGTH = 2000;
+
+export function sanitizeForDisplay(text: string): string {
+  // Strip ANSI escape sequences (CSI … letter, OSC … BEL, stray ESC),
+  // then all control chars except newline/tab (multiline commands keep
+  // their real line breaks).
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the entire purpose of this function
+  return text
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\x1b\][^\x07]*\x07/g, "")
+    .replace(/\x1b/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
 export function formatRows(rows: CommandRow[]): string {
   if (rows.length === 0) {
     return "No matching commands found in shell history.";
@@ -534,7 +569,11 @@ export function formatRows(rows: CommandRow[]): string {
       const outcome = r.exitCode === null ? "" : ` [exit ${r.exitCode}]`;
       const redacted = redactSecrets(r.command, extraPatterns);
       const marker = redacted.redacted ? ` ${REDACTED}` : "";
-      return `${i + 1}. [${date}${approx}] [${r.shell}]${outcome}${marker} ${redacted.text}\n   source: ${r.sourceFile}`;
+      let shown = sanitizeForDisplay(redacted.text);
+      if (shown.length > MAX_COMMAND_DISPLAY_LENGTH) {
+        shown = shown.slice(0, MAX_COMMAND_DISPLAY_LENGTH) + "… [truncated]";
+      }
+      return `${i + 1}. [${date}${approx}] [${r.shell}]${outcome}${marker} ${shown}\n   source: ${r.sourceFile}`;
     })
     .join("\n");
 }
@@ -650,6 +689,34 @@ export function getEmbeddingCandidates(
            WHERE e.model = ?`
         )
   ).all(model) as { id: number; embedding: Buffer; dims: number }[];
+  return rows.map((r) => ({
+    id: r.id,
+    embedding: decodeVector(r.embedding, r.dims),
+  }));
+}
+
+// Keyset-paginated twin of getEmbeddingCandidates: same rows in command_id
+// order, so callers can score streaming with bounded memory (a full load is
+// ~1.5KB/row — fine at 2k rows, 1.5GB at a million).
+export function getEmbeddingBatch(
+  model: string,
+  onlySuccessful: boolean,
+  afterId: number,
+  limit: number
+): { id: number; embedding: Float32Array }[] {
+  const base = onlySuccessful
+    ? `SELECT e.command_id AS id, e.embedding, e.dims FROM command_embeddings e
+       JOIN commands c ON c.id = e.command_id
+       WHERE e.model = ? AND c.exit_code = 0 AND e.command_id > ?
+       ORDER BY e.command_id LIMIT ?`
+    : `SELECT e.command_id AS id, e.embedding, e.dims FROM command_embeddings e
+       WHERE e.model = ? AND e.command_id > ?
+       ORDER BY e.command_id LIMIT ?`;
+  const rows = getDb().query(base).all(model, afterId, Math.max(Math.floor(limit), 1)) as {
+    id: number;
+    embedding: Buffer;
+    dims: number;
+  }[];
   return rows.map((r) => ({
     id: r.id,
     embedding: decodeVector(r.embedding, r.dims),

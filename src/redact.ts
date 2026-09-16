@@ -102,6 +102,22 @@ function maskValue(text: string, keyPattern: string): { text: string; hit: boole
 
 // Compile cache for user patterns (config is re-read per call; compiling
 // per call would waste work, and a throwing pattern must never break output).
+// Two guards against ReDoS from a hostile/mistaken pattern:
+// 1. at most MAX_USER_PATTERNS are kept (rest warn-and-skip);
+// 2. each pattern is timed once against an adversarial input — one that is
+//    slow to reject (> REDOS_BUDGET_MS) is dropped with a warning, because it
+//    would run on EVERY formatted row.
+export const MAX_USER_PATTERNS = 50;
+const REDOS_BUDGET_MS = 25;
+// biome-ignore lint/style/useTemplate: concatenation reads clearer than a template here
+const REDOS_PROBE = "a".repeat(64) + "!" + "b".repeat(64);
+// Textbook catastrophic-backtracking shape: a quantified group containing a
+// quantifier — (a+)+, (a*)*, (\w+)*, (a|aa)+. Rejected statically (no
+// execution needed); the timing probe below catches non-obvious slow ones.
+// Rationale: a user attacking themselves via their own config is out of the
+// threat model, but a copy-pasted hostile pattern shouldn't hang queries.
+const NESTED_QUANTIFIER = /\([^()]*[+*][^()]*\)[+*?]/;
+
 const compiledCache = new Map<string, RegExp[]>();
 
 function compileUserPatterns(sources: string[]): RegExp[] {
@@ -109,14 +125,42 @@ function compileUserPatterns(sources: string[]): RegExp[] {
   const cached = compiledCache.get(key);
   if (cached) return cached;
   const compiled: RegExp[] = [];
-  for (const src of sources) {
+  for (const src of sources.slice(0, MAX_USER_PATTERNS)) {
+    if (NESTED_QUANTIFIER.test(src)) {
+      console.error(
+        `[mnemyx] ignoring redactPatterns regex ${JSON.stringify(src)} (nested quantifiers risk catastrophic backtracking)`
+      );
+      continue;
+    }
+    let re: RegExp;
     try {
-      compiled.push(new RegExp(src, "g"));
+      re = new RegExp(src, "g");
     } catch (err) {
       console.error(
         `[mnemyx] ignoring invalid redactPatterns regex ${JSON.stringify(src)}: ${err instanceof Error ? err.message : String(err)}`
       );
+      continue;
     }
+    const t0 = Date.now();
+    try {
+      re.lastIndex = 0;
+      void REDOS_PROBE.replace(re, REDACTED);
+    } catch {
+      continue;
+    }
+    if (Date.now() - t0 > REDOS_BUDGET_MS) {
+      console.error(
+        `[mnemyx] ignoring slow redactPatterns regex ${JSON.stringify(src)} (possible catastrophic backtracking)`
+      );
+      continue;
+    }
+    re.lastIndex = 0;
+    compiled.push(re);
+  }
+  if (sources.length > MAX_USER_PATTERNS) {
+    console.error(
+      `[mnemyx] ignoring ${sources.length - MAX_USER_PATTERNS} redactPatterns beyond the ${MAX_USER_PATTERNS} cap`
+    );
   }
   compiledCache.set(key, compiled);
   return compiled;

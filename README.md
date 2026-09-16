@@ -70,6 +70,64 @@ Restart Claude Desktop afterwards.
 }
 ```
 
+### Free clients (no Claude subscription needed)
+
+Mnemyx is a plain local stdio server — any MCP client works. Verified shapes:
+
+**OpenCode** (terminal TUI, open-source) — `opencode.json`:
+
+```json
+{
+  "mcp": {
+    "mnemyx": {
+      "type": "local",
+      "command": ["/home/you/.bun/bin/bun", "run", "/absolute/path/to/mnemyx/src/index.ts"],
+      "enabled": true
+    }
+  }
+}
+```
+
+**Goose CLI** (open-source, Apache-2.0) — `~/.config/goose/config.yaml` (or `goose configure` → Add Extension → Command-line Extension):
+
+```yaml
+extensions:
+  - type: stdio
+    name: mnemyx
+    cmd: /home/you/.bun/bin/bun
+    args: ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+    timeout: 30000
+```
+
+**Cline** (VS Code extension, free) — `cline mcp` wizard, or `~/.cline/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mnemyx": {
+      "command": "/home/you/.bun/bin/bun",
+      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"],
+      "disabled": false
+    }
+  }
+}
+```
+
+**Zed** (free IDE) — Settings → AI → MCP Servers → Add Local Server, which writes to your settings file:
+
+```json
+{
+  "context_servers": {
+    "mnemyx": {
+      "command": "/home/you/.bun/bin/bun",
+      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+    }
+  }
+}
+```
+
+No-client testing is always free via the MCP Inspector (see quickstart).
+
 ## Platform support
 
 | Platform | History, FTS, tools | Semantic search |

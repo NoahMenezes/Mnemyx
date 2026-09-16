@@ -6,11 +6,12 @@ import {
   storeEmbeddings,
   pruneStaleEmbeddings,
   countEmbeddings,
-  getEmbeddingCandidates,
+  getEmbeddingBatch,
   getCommandsByIds,
   sortByOutcomeTier,
   applyDenylist,
   clampLimit,
+  MAX_QUERY_LENGTH,
   type CommandRow,
 } from "./db.ts";
 import { loadConfig, firstToken } from "./config.ts";
@@ -183,33 +184,63 @@ export interface SemanticOptions {
 // load, or zero vectors stored yet) so the caller can fall back to FTS5.
 // Ranking: cosine similarity, then the same proven-success boost tiers as
 // keyword search, then the denylist — both modes behave identically
-// apart from how relevance itself is scored.
+// apart from how relevance itself is scored. Memory stays flat: scores
+// stream in pages, only the running top-K is kept.
 export async function semanticSearch(
   query: string,
   opts: SemanticOptions = {}
 ): Promise<CommandRow[]> {
+  const trimmed = query.trim();
+  if (trimmed.length > MAX_QUERY_LENGTH) {
+    throw new Error(
+      `query too long (${trimmed.length} chars, max ${MAX_QUERY_LENGTH})`
+    );
+  }
   const stored = countEmbeddings(EMBEDDING_MODEL_ID);
   if (stored === 0) {
     throw new Error("no embeddings stored yet (backfill pending)");
   }
-  const [queryVec] = await embedTexts([query]);
+  const [queryVec] = await embedTexts([trimmed]);
   if (!queryVec) throw new Error("failed to embed query");
-  const candidates = getEmbeddingCandidates(
-    EMBEDDING_MODEL_ID,
-    opts.onlySuccessful === true
-  );
-  const scored = candidates.map((c) => ({
-    id: c.id,
-    score: dot(queryVec, c.embedding),
-  }));
-  scored.sort((a, b) => b.score - a.score);
   const wanted = clampLimit(opts.limit, 20);
-  const topIds = scored.slice(0, Math.min(wanted * 3 + 10, 500)).map((s) => s.id);
-  const byId = new Map(getCommandsByIds(topIds).map((r) => [r.id, r]));
+  // Bounded-memory top-K: candidates stream in keyset pages while only the
+  // running best are kept (a full vector load is ~1.5KB/row — fine at 2k
+  // rows, gigabytes at a million). Identical results to scoring everything.
+  const keep = Math.min(wanted * 3 + 10, 500);
+  const onlySuccessful = opts.onlySuccessful === true;
+  const top: { id: number; score: number }[] = [];
+  const consider = (id: number, score: number): void => {
+    if (top.length < keep) {
+      top.push({ id, score });
+      if (top.length === keep) top.sort((a, b) => b.score - a.score);
+      return;
+    }
+    const worst = top[top.length - 1];
+    if (worst !== undefined && score > worst.score) {
+      worst.id = id;
+      worst.score = score;
+      top.sort((a, b) => b.score - a.score);
+    }
+  };
+  let afterId = 0;
+  for (;;) {
+    const batch = getEmbeddingBatch(
+      EMBEDDING_MODEL_ID,
+      onlySuccessful,
+      afterId,
+      2000
+    );
+    if (batch.length === 0) break;
+    afterId = batch[batch.length - 1]?.id ?? afterId;
+    for (const c of batch) consider(c.id, dot(queryVec, c.embedding));
+  }
+  top.sort((a, b) => b.score - a.score);
+  const byId = new Map(
+    getCommandsByIds(top.map((s) => s.id)).map((r) => [r.id, r])
+  );
   // Preserve score order (byId lookup loses it), drop any missing rows.
   const ordered: CommandRow[] = [];
-  for (const s of scored) {
-    if (ordered.length >= topIds.length) break;
+  for (const s of top) {
     const row = byId.get(s.id);
     if (row) ordered.push(row);
   }

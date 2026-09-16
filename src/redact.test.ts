@@ -98,8 +98,27 @@ test("user patterns extend; invalid regexes warn and skip safely", () => {
   expect(clean.text).toBe("deploy ordinary now");
 });
 
-test("formatRows masks secrets, tags the hit, leaves clean rows alone", () => {
-  const text = formatRows([
+test("nested-quantifier patterns are rejected statically (ReDoS guard)", () => {
+  for (const evil of ["(a+)+$", "(a*)*", "(\\w+)*b", "(a|aa)+$"]) {
+    const r = redactSecrets("deploy aaaa now", [evil]);
+    // Evil pattern ignored: output equals the no-pattern result.
+    expect(r).toEqual(redactSecrets("deploy aaaa now"));
+  }
+  // Safe lookalikes still work.
+  expect(redactSecrets("deploy v1.2 now", ["v\\d+\\.\\d+"]).text).toBe(
+    `deploy ${REDACTED} now`
+  );
+});
+
+test("pattern count is capped at MAX_USER_PATTERNS", async () => {
+  const { MAX_USER_PATTERNS } = await import("./redact.ts");
+  const many = Array.from({ length: MAX_USER_PATTERNS + 5 }, (_, i) => `zzz${i}zzz`);
+  const r = redactSecrets("deploy zzz0zzz now", many);
+  expect(r.redacted).toBe(true);
+  expect(r.text).toBe(`deploy ${REDACTED} now`);
+});
+
+test("formatRows masks secrets, tags the hit, leaves clean rows alone", () => {  const text = formatRows([
     row("export AWS_SECRET=hunter2"),
     row("git status"),
   ]);

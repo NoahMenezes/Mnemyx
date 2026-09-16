@@ -1,6 +1,7 @@
-import { existsSync, statSync, readFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { requireHome } from "./config.ts";
+import { readTailWindow } from "./fsutil.ts";
 import type { HistoryEntry, SupportedShell } from "./db.ts";
 
 // ---------------------------------------------------------------------------
@@ -13,6 +14,11 @@ interface HistorySource {
   /** Which parser to use for this file. */
   format: "zsh-extended" | "plain";
 }
+
+// Refuse unbounded reads: HISTFILESIZE=unlimited users can grow these past
+// hundreds of MB. Over the cap we index the most recent window instead of
+// stalling startup or OOMing it.
+export const MAX_HISTORY_FILE_BYTES = 32 * 1024 * 1024;
 
 // Candidate history files. Phase 1 scope: macOS/Linux, zsh + bash only.
 // Callers probe each path and skip missing ones — most users have 1-2 of these.
@@ -77,6 +83,7 @@ function joinZshLines(physical: string[]): string[] {
     if (current.endsWith("\\") && !nextIsHeader && next !== undefined) {
       // Escaped embedded newline: drop the escape char, restore the newline,
       // keep accumulating into the same logical entry.
+      // biome-ignore lint/style/useTemplate: concatenation reads clearer than a template here
       current = current.slice(0, -1) + "\n";
     } else {
       logical.push(current);
@@ -184,7 +191,8 @@ export function parseAllAvailableHistory(): HistoryEntry[] {
   for (const source of getHistoryFilePaths()) {
     if (!existsSync(source.path)) continue;
     try {
-      const content = readFileSync(source.path, "utf8");
+      const content = readTailWindow(source.path, MAX_HISTORY_FILE_BYTES);
+      if (content === null) continue; // unreadable mid-loop; skip gracefully
       // mtime fallback for formats without timestamps (seconds).
       const mtime = Math.floor(statSync(source.path).mtimeMs / 1000);
       let entries: HistoryEntry[];

@@ -42,6 +42,7 @@ function usage(): string {
 Usage:
   mnemyx init [--yes] [--no-hook] [--shell zsh|bash]   First-time setup wizard
   mnemyx status                                        Health report (changes nothing)
+  mnemyx bench [--rows N] [--queries N] [--skip-semantic]  Synthetic perf baseline (temp DB, changes nothing)
   mnemyx --help | -h                                   This text
   mnemyx --version | -v                                Print version`;
 }
@@ -458,6 +459,28 @@ async function main(argv: string[]): Promise<number> {
   }
   if (cmd === "init") {
     return await cmdInit(rest);
+  }
+  if (cmd === "bench") {
+    const { runBench, formatBench } = await import("./bench.ts");
+    let rows: number | undefined;
+    let queries: number | undefined;
+    let skipSemantic = false;
+    for (let i = 0; i < rest.length; i++) {
+      const a = rest[i];
+      if (a === "--rows") rows = Number.parseInt(rest[++i] as string, 10);
+      else if (a === "--queries") queries = Number.parseInt(rest[++i] as string, 10);
+      else if (a === "--skip-semantic") skipSemantic = true;
+      else {
+        console.error(`unknown flag for bench: ${a} (see mnemyx --help)`);
+        return 2;
+      }
+    }
+    if (rows !== undefined && (!Number.isFinite(rows) || rows <= 0)) {
+      console.error(`--rows expects a positive number`);
+      return 2;
+    }
+    console.log(formatBench(await runBench({ rows, queries, skipSemantic })));
+    return 0;
   }
   console.error(`unknown command: ${JSON.stringify(cmd)}\n\n${usage()}`);
   return 2;

@@ -123,3 +123,16 @@ test("backfill on an empty DB is an instant no-op", async () => {
   expect(r.embedded).toBe(0);
   expect(calls).toBe(0);
 });
+
+test("overlong semantic queries throw before touching the model", async () => {
+  initDb(dbPath());
+  const { semanticSearch } = await import("./embeddings.ts");
+  const long = "a".repeat(501);
+  let err: unknown = null;
+  try {
+    await semanticSearch(long, { limit: 5 });
+  } catch (e) {
+    err = e;
+  }
+  expect(String((err as Error)?.message ?? err)).toMatch(/too long/);
+});

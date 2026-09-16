@@ -6,6 +6,7 @@ import {
   getRecentCommands,
   formatRows,
   countEmbeddings,
+  closeDb,
 } from "./db.ts";
 import { runImport } from "./import.ts";
 import { getExitLogPath } from "./exitLog.ts";
@@ -162,6 +163,18 @@ async function main(): Promise<void> {
 // Entry guard: importing this module must never launch the server
 // (tests and future tooling import it for its pieces).
 if (import.meta.main) {
+  // Graceful shutdown: checkpoint WAL + close the DB instead of dying
+  // mid-transaction when the client kills us (client restarts, timeouts).
+  const shutdown = (signal: string): void => {
+    try {
+      console.error(`[mnemyx] ${signal} received, closing DB`);
+      closeDb();
+    } finally {
+      process.exit(0);
+    }
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
   main().catch((err) => {
     console.error(`[mnemyx] fatal: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
