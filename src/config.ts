@@ -67,8 +67,26 @@ export interface MnemyxConfig {
 }
 
 export function getConfigPath(): string {
-  const home = process.env.HOME || homedir();
-  return join(home, ".mnemyx", "config.json");
+  return join(requireHome(), ".mnemyx", "config.json");
+}
+
+// Central home-directory resolution. $HOME wins; otherwise the OS passwd
+// entry. Both missing (minimal containers, odd launchd contexts) used to
+// surface as a cryptic homedir() throw — sometimes at module import time,
+// killing even keyword-only runs. Now it's one actionable error.
+// `env`/`systemHome` are injectable so tests never touch ambient state.
+export function requireHome(
+  env: Record<string, string | undefined> = process.env,
+  systemHome: () => string = homedir
+): string {
+  if (env.HOME !== undefined && env.HOME !== "") return env.HOME;
+  try {
+    return systemHome();
+  } catch {
+    throw new Error(
+      "mnemyx needs a home directory: $HOME is unset and no OS user entry exists — set HOME to a writable directory and retry"
+    );
+  }
 }
 
 // Read fresh on every call (no cache): the file is tiny, MCP calls are

@@ -1,8 +1,7 @@
 import { Database } from "bun:sqlite";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
-import { loadConfig, firstToken } from "./config.ts";
+import { mkdirSync, chmodSync, existsSync } from "node:fs";
+import { loadConfig, firstToken, requireHome } from "./config.ts";
 import { redactSecrets, REDACTED } from "./redact.ts";
 
 // Supported shells. Phase 1 scope: zsh + bash on macOS/Linux only.
@@ -36,23 +35,50 @@ let db: Database | null = null;
 // Resolve the per-user DB path. Absolute on purpose: MCP clients launch
 // this server with an unpredictable cwd, so a repo-relative path would
 // create stray DBs or fail to find the real one.
-export function getDefaultDbPath(): string {
-  const home = homedir();
-  if (process.platform === "darwin") {
+// Pure helper (platform/home/xdg injected) so every branch — including
+// macOS paths — is unit-testable on any machine.
+export function dbPathFor(
+  platform: string,
+  home: string,
+  xdgDataHome: string | undefined
+): string {
+  if (platform === "darwin") {
     return join(home, "Library", "Application Support", "mnemyx", "mnemyx.db");
   }
-  // Linux (and fallback): XDG data home. macOS/Linux only in Phase 1.
-  const dataHome =
-    process.env.XDG_DATA_HOME || join(home, ".local", "share");
+  // Linux (and fallback): XDG data home. macOS/Linux only.
+  const dataHome = xdgDataHome || join(home, ".local", "share");
   return join(dataHome, "mnemyx", "mnemyx.db");
+}
+
+export function getDefaultDbPath(): string {
+  return dbPathFor(process.platform, requireHome(), process.env.XDG_DATA_HOME);
 }
 
 // Open (creating parent dirs) and migrate the DB. Idempotent.
 export function initDb(dbPath: string = getDefaultDbPath()): Database {
   if (db) return db;
   mkdirSync(join(dbPath, ".."), { recursive: true });
+  const fresh = !existsSync(dbPath);
   db = new Database(dbPath, { create: true });
-  db.run("PRAGMA journal_mode = WAL;");
+  // History data is sensitive (may contain pasted secrets): restrict a
+  // newly created DB file to the owner. Pre-existing files keep their perms.
+  if (fresh) {
+    try {
+      chmodSync(dbPath, 0o600);
+    } catch {
+      // Non-fatal (exotic filesystems); the DB works regardless.
+    }
+  }
+  // Concurrent writers (server + `mnemyx init` at once) wait instead of
+  // throwing SQLITE_BUSY immediately.
+  db.run("PRAGMA busy_timeout = 5000;");
+  try {
+    db.run("PRAGMA journal_mode = WAL;");
+  } catch {
+    // WAL needs shared-memory files beside the DB — unavailable on some
+    // network filesystems. Default rollback-journal mode works fine.
+    console.error("[mnemyx] WAL mode unavailable, using default journal mode");
+  }
   db.run(`
     CREATE TABLE IF NOT EXISTS commands (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,6 +108,52 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
   // row (all pre-hook history simply reads back as NULL = unknown).
   if (!colNames.includes("exit_code")) {
     db.run(`ALTER TABLE commands ADD COLUMN exit_code INTEGER;`);
+  }
+  // One-time NFC convergence for rows imported before storage normalization:
+  // without it, re-imports would INSERT OR IGNORE-miss (NFC text differs
+  // from the stored NFD twin) and duplicate those rows. Rows whose NFC twin
+  // already exists are dropped (carrying a proven exit code over first);
+  // the rest are updated in place. No-op on already-clean DBs.
+  {
+    const rows = db
+      .query(`SELECT id, command, timestamp, source_file, exit_code FROM commands;`)
+      .all() as {
+      id: number;
+      command: string;
+      timestamp: number;
+      source_file: string;
+      exit_code: number | null;
+    }[];
+    const dirty = rows.filter((r) => r.command !== r.command.normalize("NFC"));
+    if (dirty.length > 0) {
+      const twinStmt = db.query(
+        `SELECT id, exit_code FROM commands WHERE command = ? AND timestamp = ? AND source_file = ? AND id != ? LIMIT 1`
+      );
+      const carryStmt = db.query(`UPDATE commands SET exit_code = ? WHERE id = ?`);
+      const fixStmt = db.query(`UPDATE commands SET command = ? WHERE id = ?`);
+      const delStmt = db.query(`DELETE FROM commands WHERE id = ?`);
+      const converge = db.transaction(() => {
+        for (const r of dirty) {
+          const nfc = r.command.normalize("NFC");
+          const twin = twinStmt.get(nfc, r.timestamp, r.sourceFile) as {
+            id: number;
+            exit_code: number | null;
+          } | null;
+          // NOTE: twin lookup omits the id exclusion (a twin IS another row
+          // by definition here since r.command itself is non-NFC).
+          if (twin) {
+            if (twin.exit_code === null && r.exit_code !== null) {
+              carryStmt.run(r.exit_code, twin.id);
+            }
+            delStmt.run(r.id);
+          } else {
+            fixStmt.run(nfc, r.id);
+          }
+        }
+      });
+      converge();
+      console.error(`[mnemyx] normalized ${dirty.length} pre-existing rows to NFC`);
+    }
   }
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_commands_command ON commands(command);`
@@ -174,6 +246,33 @@ function getDb(): Database {
 
 const MAX_LIMIT = 100;
 
+// Concurrent writers (server + `mnemyx init` racing an import) collide on
+// SQLite locks. busy_timeout covers plain SQLITE_BUSY, but NOT
+// SQLITE_BUSY_SNAPSHOT: a transaction that READs (our before-count) and
+// then writes while another connection holds RESERVED fails immediately
+// without invoking the busy handler. So every write transaction also
+// retries a few times with backoff — each attempt gets a fresh snapshot.
+const BUSY_RETRIES = 10;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withBusyRetry<T>(fn: () => T): T {
+  let last: unknown = new Error("withBusyRetry: unreachable");
+  for (let i = 0; i < BUSY_RETRIES; i++) {
+    try {
+      return fn();
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code !== "SQLITE_BUSY" || i === BUSY_RETRIES - 1) throw err;
+      last = err;
+      sleepSync(50 * (i + 1));
+    }
+  }
+  throw last;
+}
+
 export function clampLimit(limit: number | undefined, fallback: number): number {
   if (limit === undefined || !Number.isFinite(limit)) return fallback;
   return Math.min(Math.max(Math.floor(limit), 1), MAX_LIMIT);
@@ -209,6 +308,7 @@ function rowToEntry(row: DbRow): CommandRow {
 
 // Insert one command. INSERT OR IGNORE makes startup re-imports idempotent:
 // re-parsing the same history files never creates duplicates and keeps ids stable.
+// Stored text is NFC-normalized (macOS NFD input), so the DB holds one form.
 export function insertCommand(entry: HistoryEntry): void {
   getDb()
     .query(
@@ -217,7 +317,7 @@ export function insertCommand(entry: HistoryEntry): void {
        VALUES (?, ?, ?, ?, ?)`
     )
     .run(
-      entry.command,
+      entry.command.normalize("NFC"),
       entry.timestamp,
       entry.sourceFile,
       entry.shell,
@@ -244,7 +344,7 @@ export function bulkInsert(entries: HistoryEntry[]): number {
     const before = (countAll.get() as { n: number }).n;
     for (const e of rows) {
       stmt.run(
-        e.command,
+        e.command.normalize("NFC"),
         e.timestamp,
         e.sourceFile,
         e.shell,
@@ -253,7 +353,7 @@ export function bulkInsert(entries: HistoryEntry[]): number {
     }
     return (countAll.get() as { n: number }).n - before;
   });
-  return insertMany(entries);
+  return withBusyRetry(() => insertMany(entries));
 }
 
 // Phase 2 keyword search: SQLite FTS5 full-text match with BM25 ranking.
@@ -264,7 +364,8 @@ export function bulkInsert(entries: HistoryEntry[]): number {
 // Queries with no searchable tokens (e.g. only symbols like "&&") fall back
 // to the Phase 1 LIKE match so the tool never returns nothing spuriously.
 function buildFtsMatch(query: string): string | null {
-  const tokens = query.toLowerCase().match(/[a-z0-9]+/g);
+  // NFC for the same reason history import normalizes (macOS NFD text).
+  const tokens = query.normalize("NFC").toLowerCase().match(/[a-z0-9]+/g);
   if (!tokens || tokens.length === 0) return null;
   return tokens
     .slice(0, 10)
@@ -402,7 +503,7 @@ export function applyExitCodes(
       return updated;
     }
   );
-  return applyMany([...outcomes.entries()]);
+  return withBusyRetry(() => applyMany([...outcomes.entries()]));
 }
 
 // Stable outcome-tier sort (proven success -> unknown -> failure).
@@ -528,7 +629,7 @@ export function storeEmbeddings(
       stmt.run(id, encodeVector(vec), model, dims);
     }
   });
-  storeMany();
+  withBusyRetry(() => storeMany());
 }
 
 // All stored vectors (+ optional proven-success pre-filter so top-k isn't

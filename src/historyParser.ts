@@ -1,6 +1,6 @@
 import { existsSync, statSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { requireHome } from "./config.ts";
 import type { HistoryEntry, SupportedShell } from "./db.ts";
 
 // ---------------------------------------------------------------------------
@@ -17,7 +17,7 @@ interface HistorySource {
 // Candidate history files. Phase 1 scope: macOS/Linux, zsh + bash only.
 // Callers probe each path and skip missing ones — most users have 1-2 of these.
 export function getHistoryFilePaths(): HistorySource[] {
-  const home = homedir();
+  const home = requireHome();
   return [
     { path: join(home, ".zsh_history"), shell: "zsh", format: "zsh-extended" },
     { path: join(home, ".bash_history"), shell: "bash", format: "plain" },
@@ -97,7 +97,10 @@ export function parseZshHistory(
     if (!line.trim()) continue;
     const m = ZSH_LINE_RE.exec(line);
     if (m?.[1] !== undefined && m[3] !== undefined) {
-      const command = m[3].trim();
+      // NFC-normalize: macOS terminals/filesystems commonly produce NFD
+      // (e.g. filenames), while queries arrive as NFC — without this the
+      // same word in two forms never matches (FTS or vector).
+      const command = m[3].trim().normalize("NFC");
       if (!command) continue;
       entries.push({
         command,
@@ -108,7 +111,7 @@ export function parseZshHistory(
       });
     } else {
       // Plain line in a zsh file (EXTENDED_HISTORY off) — keep it, approximate time.
-      const command = line.trim();
+      const command = line.trim().normalize("NFC");
       if (!command) continue;
       entries.push({
         command,
@@ -136,7 +139,7 @@ export function parsePlainHistory(
 ): HistoryEntry[] {
   const entries: HistoryEntry[] = [];
   for (const line of content.split("\n")) {
-    const command = line.trim();
+    const command = line.trim().normalize("NFC");
     if (!command) continue;
     entries.push({
       command,

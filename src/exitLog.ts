@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { requireHome } from "./config.ts";
 
 // ---------------------------------------------------------------------------
 // Phase 3: exit-code log written by the opt-in shell hook (see README).
@@ -15,8 +15,7 @@ import { join } from "node:path";
 // ---------------------------------------------------------------------------
 
 export function getExitLogPath(): string {
-  const home = process.env.HOME || homedir();
-  return join(home, ".mnemyx", "exit-codes.log");
+  return join(requireHome(), ".mnemyx", "exit-codes.log");
 }
 
 export interface ExitRecord {
@@ -58,6 +57,8 @@ export function parseExitLog(
         skipped++;
         continue;
       }
+      // NFC to match history import normalization (macOS NFD filenames).
+      const command = obj.cmd.normalize("NFC");
       if (
         typeof obj.exit !== "number" ||
         !Number.isInteger(obj.exit) ||
@@ -67,8 +68,8 @@ export function parseExitLog(
         skipped++;
         continue;
       }
-      outcomes.set(obj.cmd, {
-        command: obj.cmd,
+      outcomes.set(command, {
+        command,
         exit: obj.exit,
         timestamp:
           typeof obj.ts === "number" && Number.isFinite(obj.ts)

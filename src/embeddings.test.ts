@@ -54,6 +54,26 @@ test("model id contract: MiniLM family, 384 dims, q8 tag", () => {
   expect(getModelCacheDir().length).toBeGreaterThan(0);
 });
 
+test("no static value-import of transformers (Intel-Mac crash guard)", async () => {
+  // Platforms without an onnxruntime native binary (Intel Macs: no
+  // darwin/x64 build) throw when the transformers bundle LOADS, because it
+  // requires the .node binding at top level. embeddings.ts must therefore
+  // only ever import it lazily (dynamic import inside try/catch) so those
+  // platforms degrade to keyword search instead of crashing at startup.
+  // This test pins that property structurally.
+  const src = await Bun.file(
+    new URL("./embeddings.ts", import.meta.url)
+  ).text();
+  const lines = src.split("\n");
+  const staticImports = lines.filter(
+    (l) =>
+      /^\s*import\s/.test(l) &&
+      l.includes("@huggingface/transformers") &&
+      !l.includes("import type")
+  );
+  expect(staticImports).toEqual([]);
+});
+
 test("backfill covers everything past noise heads and sparse ids", async () => {
   initDb(dbPath());
   // Adversarial layout: 200-row noise head (pins naive LIMIT cursors),

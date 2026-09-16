@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, readFileSync, appendFileSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
+import { requireHome } from "./config.ts";
 
 // ---------------------------------------------------------------------------
 // Exit-code shell hook: snippets installed into ~/.zshrc / ~/.bashrc by
@@ -49,18 +49,23 @@ _mnemyx_prompt() {
   return "$code"
 }
 if [[ "\${PROMPT_COMMAND:-}" != *"_mnemyx_prompt"* ]]; then
+  # NB: PROMPT_COMMAND as an *array* (bash 5.1+) is not handled — if
+  # 'declare -p PROMPT_COMMAND' shows "declare -a", prepend _mnemyx_prompt
+  # to the array manually instead of using this block.
   PROMPT_COMMAND="_mnemyx_prompt\${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 fi
 ${HOOK_END}`;
 }
 
-export function detectShell(override?: string): HookShell {
+export function detectShell(override?: string): HookShell | null {
   if (override === "zsh" || override === "bash") return override;
   const base = basename(process.env.SHELL || "");
-  return base === "bash" ? "bash" : "zsh"; // zsh default (macOS + common Linux)
+  if (base === "bash") return "bash";
+  if (base === "zsh" || base === "") return "zsh"; // zsh default (macOS + common Linux)
+  return null; // unrecognized (fish, dash, …) — caller must ask, never guess
 }
 
-export function rcPath(shell: HookShell, home = process.env.HOME || homedir()): string {
+export function rcPath(shell: HookShell, home = requireHome()): string {
   return join(home, shell === "zsh" ? ".zshrc" : ".bashrc");
 }
 
@@ -74,11 +79,22 @@ export function hookInstalled(rc: string): boolean {
 export function installHook(
   rc: string,
   shell: HookShell,
-  home = process.env.HOME || homedir()
+  home = requireHome()
 ): { written: boolean } {
   if (hookInstalled(rc)) return { written: false };
-  mkdirSync(join(home, ".mnemyx"), { recursive: true });
+  mkdirSync(join(home, ".mnemyx"), { recursive: true, mode: 0o700 });
   mkdirSync(dirname(rc), { recursive: true });
+  // Pre-create the log owner-only: the shell appends via umask-dependent
+  // redirect, so claiming 0600 here is the only reliable moment.
+  try {
+    writeFileSync(join(home, ".mnemyx", "exit-codes.log"), "", {
+      flag: "a",
+      mode: 0o600,
+    });
+    chmodSync(join(home, ".mnemyx", "exit-codes.log"), 0o600);
+  } catch {
+    // Non-fatal; logging still works, just with default perms.
+  }
   const snippet = shell === "zsh" ? zshSnippet() : bashSnippet();
   const prev = existsSync(rc) ? readFileSync(rc, "utf8") : "";
   const sep = prev.length > 0 && !prev.endsWith("\n") ? "\n" : "";

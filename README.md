@@ -42,33 +42,49 @@ claude mcp add mnemyx -- bun run /absolute/path/to/mnemyx/src/index.ts
 
 Then `/mcp` to confirm it's connected.
 
-**Claude Desktop** — add to `claude_desktop_config.json` (`~/.config/Claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/` on macOS):
+**Claude Desktop** — add to `claude_desktop_config.json` (`~/.config/Claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/` on macOS). Use the **absolute** bun path — GUI-launched apps inherit a minimal PATH that usually lacks `~/.bun/bin`:
 
 ```json
 {
   "mcpServers": {
     "mnemyx": {
-      "command": "bun",
+      "command": "/home/you/.bun/bin/bun",
       "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
     }
   }
 }
 ```
 
-Use the absolute `bun` path (`which bun`) if Desktop can't find it on PATH. Restart Claude Desktop afterwards.
+Restart Claude Desktop afterwards.
 
-**Cursor** — Settings → MCP → Add server (same command/args shape as above), or add to `.cursor/mcp.json` in your workspace:
+**Cursor** — Settings → MCP → Add server (same command/args shape as above, absolute `bun` path recommended), or add to `.cursor/mcp.json` in your workspace:
 
 ```json
 {
   "mcpServers": {
     "mnemyx": {
-      "command": "bun",
+      "command": "/home/you/.bun/bin/bun",
       "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
     }
   }
 }
 ```
+
+## Platform support
+
+| Platform | History, FTS, tools | Semantic search |
+|---|---|---|
+| Linux x64, glibc ≥ 2.28 | Full | Full (local ONNX) |
+| Linux x64, older glibc / musl (Alpine) / minimal containers | Full | Keyword fallback (no native ONNX prebuild fits) |
+| Linux arm64 | Full (binaries bundled) | Expected full — needs a field report, fallback covers |
+| macOS Apple Silicon | Full | Expected full — needs a field report, fallback covers |
+| macOS Intel | Full | Keyword only — upstream ships no `darwin/x64` ONNX binary and the Node build rejects WASM devices, so there is nothing to load. The server detects this and serves keyword results |
+
+Notes:
+- macOS ships bash 3.2 and zsh 5.x — the hook snippets use only constructs legal in both (verified). `python3` is required for the hook: on a fresh Mac the first `python3` run pops a Command Line Tools install dialog (accept it once, or `brew install python3`); `mnemyx init` probes this and warns.
+- The hook adds ~40 ms of prompt latency (measured: one `python3` spawn per command). Remove the snippet to disable; nothing else changes.
+- For a stable client registration prefer a global install (`bun install -g mnemyx`) over `bunx` cache paths, which can shift between versions. `mnemyx init` always prints paths resolved from its own location.
+- DB/log/model files are created owner-only (`0600`, dirs `0700`). Filenames with accented characters match regardless of macOS NFD vs NFC normalization.
 
 ## Tools
 
@@ -146,6 +162,16 @@ Design notes: the DB keeps true text (so you can still *find* "the deploy using 
 | `redactPatterns` | `[]` | Extra secret regexes for output masking; invalid ones warn and skip |
 
 `mnemyx status` prints the effective configuration plus DB/hook/model health without changing anything.
+
+## Troubleshooting
+
+- **Client says the server fails to start / `bun: command not found`.** The client spawns `bun` with a minimal PATH. Re-register using the absolute bun path (`which bun`) — `mnemyx init` prints it. Verify with `mnemyx status` from a terminal first.
+- **Semantic search silently returns keyword results.** Expected on Intel Macs, muslLinux, old glibc, or offline first runs. Check server stderr for `embedding model unavailable: <reason>` — it names the cause. `mode: "semantic"` surfaces the same note inside the tool response.
+- **Hook installed but no `[exit N]` markers.** Reload the shell (`source ~/.zshrc`), run `true; false`, check `tail ~/.mnemyx/exit-codes.log`. If the file stays empty, `python3` is the usual culprit (see Platform support). Restart the server after — outcomes apply at import.
+- **Prompt feels slower after hook install.** ~40 ms per command is the measured cost of the `python3` log call. Remove the snippet block from your rc file to revert instantly.
+- **`database is locked` errors.** Two writers colliding beyond the 5 s grace window (large parallel imports). Re-run; imports are idempotent. Persistent cases: check for a stale `-wal`/`-shm` pair or another process holding the DB.
+- **Bash `PROMPT_COMMAND` is an array (bash 5.1+).** The snippet's string prepend doesn't apply — prepend `_mnemyx_prompt` to the array manually instead (documented in the snippet comment).
+- **Accented characters don't match.** Import and query both normalize to NFC; if you indexed before this fix, re-imports are idempotent and converge on re-runs.
 
 ## Privacy: what's stored where, what never happens
 

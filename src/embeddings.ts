@@ -1,4 +1,4 @@
-import { env, pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
+import type { FeatureExtractionPipeline } from "@huggingface/transformers";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -40,12 +40,13 @@ export const EMBEDDING_MODEL_ID = `${EMBEDDING_MODEL}:${EMBEDDING_DTYPE}`;
 // Model weights live OUTSIDE node_modules on purpose: the library default
 // is <package>/.cache (wiped on clean reinstall -> surprise re-download).
 // Ours survives reinstalls; HF_HOME overrides (standard convention).
+// Resolved lazily (see getExtractor) so exotic environments fail at first
+// USE, inside try/catch, never at module import.
 export function getModelCacheDir(): string {
   if (process.env.HF_HOME) return process.env.HF_HOME;
   const home = process.env.HOME || homedir();
   return join(home, ".cache", "mnemyx", "models");
 }
-env.cacheDir = getModelCacheDir();
 
 // Lazy singleton: model loads on first semantic use or background backfill,
 // NEVER on server startup (an MCP spawn must stay fast). First call also
@@ -62,6 +63,16 @@ async function getExtractor(): Promise<FeatureExtractionPipeline> {
   if (!extractorPromise) {
     extractorPromise = (async () => {
       try {
+        // Dynamic import ON PURPOSE: the transformers bundle requires the
+        // platform's onnxruntime native binding at load time, and platforms
+        // without one (Intel Macs: no darwin/x64 binary) would otherwise
+        // crash the whole server at module import — before any fallback can
+        // run. Importing lazily here turns that into a catchable error, so
+        // affected platforms degrade to keyword search and keep serving.
+        const { env, pipeline } = await import(
+          "@huggingface/transformers"
+        );
+        env.cacheDir = getModelCacheDir();
         console.error(
           `[mnemyx] loading embedding model ${EMBEDDING_MODEL_ID} (first run downloads ~23MB to ${getModelCacheDir()}, then works offline)`
         );
@@ -86,7 +97,12 @@ async function getExtractor(): Promise<FeatureExtractionPipeline> {
 export async function embedTexts(texts: string[]): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
   const ext = await getExtractor();
-  const out = await ext(texts, { pooling: "mean", normalize: true });
+  // NFC-normalized like everything stored, so query and index live in the
+  // same space regardless of input normalization form.
+  const out = await ext(
+    texts.map((t) => t.normalize("NFC")),
+    { pooling: "mean", normalize: true }
+  );
   const flat = out.data as Float32Array;
   const dims = flat.length / texts.length;
   if (!Number.isInteger(dims) || dims !== EMBEDDING_DIMS) {

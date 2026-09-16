@@ -104,8 +104,15 @@ test("dedupeConsecutive collapses runs, keeps near-misses and repeats", () => {
   expect(dedupeConsecutive([])).toEqual([]);
 });
 
-test("history sources are zsh + bash only (scope lock, no fish/powershell)", () => {
-  const sources = getHistoryFilePaths();
+test("commands normalize NFD input to NFC at parse time", () => {
+  const nfd = "café".normalize("NFD");
+  const zsh = parseZshHistory(`: 100:0;open ${nfd}\n`, SRC, FALLBACK);
+  expect(zsh[0]?.command).toBe("open café");
+  const plain = parsePlainHistory(`open ${nfd}\n`, SRC, "bash", FALLBACK);
+  expect(plain[0]?.command).toBe("open café");
+});
+
+test("history sources are zsh + bash only (scope lock, no fish/powershell)", () => {  const sources = getHistoryFilePaths();
   const shells = new Set(sources.map((s) => s.shell));
   expect(shells.has("zsh")).toBe(true);
   expect(shells.has("bash")).toBe(true);

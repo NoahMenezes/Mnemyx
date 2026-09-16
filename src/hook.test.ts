@@ -1,5 +1,5 @@
 import { test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,15 +29,19 @@ test("snippets are self-contained blocks with begin/end markers", () => {
   expect(bashSnippet()).toContain("history 1");
 });
 
-test("detectShell honors override, then $SHELL, defaulting to zsh", () => {
+test("detectShell honors override, then $SHELL, null when unrecognized", () => {
   expect(detectShell("bash")).toBe("bash");
   expect(detectShell("zsh")).toBe("zsh");
   const saved = process.env.SHELL;
   try {
     process.env.SHELL = "/bin/bash";
     expect(detectShell()).toBe("bash");
-    process.env.SHELL = "/usr/bin/fish";
+    process.env.SHELL = "/bin/zsh";
     expect(detectShell()).toBe("zsh");
+    process.env.SHELL = "/usr/bin/fish";
+    expect(detectShell()).toBeNull();
+    process.env.SHELL = "/bin/dash";
+    expect(detectShell()).toBeNull();
     delete process.env.SHELL;
     expect(detectShell()).toBe("zsh");
   } finally {
@@ -73,6 +77,15 @@ test("installHook creates a missing rc file and the .mnemyx dir", () => {
   const rc = join(dir, "sub", ".bashrc");
   expect(installHook(rc, "bash", dir).written).toBe(true);
   expect(hookInstalled(rc)).toBe(true);
+});
+
+test("installHook pre-creates the exit log owner-only", () => {
+  const home = join(dir, "h2");
+  const rc = join(home, ".zshrc");
+  installHook(rc, "zsh", home);
+  const logPath = join(home, ".mnemyx", "exit-codes.log");
+  expect(statSync(logPath).size).toBe(0);
+  expect(statSync(logPath).mode & 0o777).toBe(0o600);
 });
 
 // Cleanup after all hook tests in this file.

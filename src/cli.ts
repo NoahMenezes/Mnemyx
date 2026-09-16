@@ -4,7 +4,7 @@
 // shell-hook install (explicit consent only — never silent), and MCP client
 // registration. `mnemyx status` reports health without changing anything.
 // ---------------------------------------------------------------------------
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +51,13 @@ async function ask(promptText: string): Promise<boolean> {
   const line = await readStdinLine();
   const answer = (line ?? "").trim().toLowerCase();
   return answer === "y" || answer === "yes"; // EOF / anything else = No
+}
+
+// Free-text prompt (for choices). EOF resolves as "".
+async function askText(promptText: string): Promise<string> {
+  process.stdout.write(promptText);
+  const line = await readStdinLine();
+  return (line ?? "").trim();
 }
 
 // Line reader over raw stdin. Bun's node:readline/promises hangs on the
@@ -196,6 +203,69 @@ interface InitFlags {
   shell?: string;
 }
 
+// Preflight: warn (never fail, except Bun version above) about anything
+// that degrades mnemyx on this machine. Each check is best-effort and
+// exception-proof — a failing check must not break init itself.
+function runPreflightWarnings(): void {
+  const warn = (msg: string): void => console.log(`      (!) ${msg}`);
+  try {
+    // python3 powers the exit-code hook. This catches both "not installed"
+    // and the macOS stub that pops a Command Line Tools dialog on first run.
+    const py = Bun.spawnSync(["python3", "-c", "import json"]);
+    if (py.exitCode !== 0) {
+      warn(
+        "python3 doesn't work — the optional exit-code hook needs it " +
+          "(Linux: install python3; macOS: accept the Command Line Tools prompt, or brew install python3)"
+      );
+    }
+  } catch {
+    warn("could not probe python3 — the optional exit-code hook needs it");
+  }
+  try {
+    // Native ONNX needs glibc >= 2.28; musl (Alpine) has no prebuild at all.
+    // Either way semantic search degrades to keyword — this just explains it.
+    if (process.platform === "linux") {
+      const ldd = Bun.spawnSync(["ldd", "--version"]);
+      const out = `${ldd.stdout}`.split("\n")[0] ?? "";
+      if (/musl/i.test(out)) {
+        warn(
+          "musl libc detected (e.g. Alpine) — no ONNX prebuild exists, semantic search will use keyword fallback"
+        );
+      } else {
+        const m = out.match(/(\d+)\.(\d+)/);
+        if (m?.[1] !== undefined && m?.[2] !== undefined) {
+          const major = Number.parseInt(m[1], 10);
+          const minor = Number.parseInt(m[2], 10);
+          if (major < 2 || (major === 2 && minor < 28)) {
+            warn(
+              `glibc ${major}.${minor} < 2.28 — no ONNX prebuild fits, semantic search will use keyword fallback`
+            );
+          }
+        }
+      }
+    }
+  } catch {
+    // ldd missing (minimal containers) — skip silently, fallback covers it.
+  }
+  if (!Bun.which("bun")) {
+    warn(
+      "bun is not on PATH — GUI-launched clients (Claude Desktop) spawn with a minimal PATH; register them with the absolute bun path printed below"
+    );
+  }
+  try {
+    // Writability probe for the DB directory (read-only HOME, odd mounts).
+    const probeDir = join(getDefaultDbPath(), "..");
+    mkdirSync(probeDir, { recursive: true });
+    const probe = join(probeDir, ".mnemyx-write-test");
+    writeFileSync(probe, "");
+    rmSync(probe);
+  } catch {
+    warn(
+      `cannot write to the database directory (${join(getDefaultDbPath(), "..")}) — imports will fail until permissions are fixed`
+    );
+  }
+}
+
 function parseInitFlags(args: string[]): InitFlags {
   const flags: InitFlags = { yes: false, noHook: false };
   for (let i = 0; i < args.length; i++) {
@@ -246,9 +316,17 @@ async function cmdInit(rawArgs: string[]): Promise<number> {
   const flags = parseInitFlags(rawArgs);
   console.log(`mnemyx init — local-first shell-history search (v${VERSION})\n`);
 
-    // 1. Environment.
-    const bunVersion = Bun.version;
-    console.log(`[1/4] Runtime: Bun ${bunVersion} ✓ (need >= 1.4)`);
+  // 1. Environment: hard-fail only what cannot work; warn on the rest.
+  const [bunMajor = 0, bunMinor = 0] = Bun.version
+    .split(".")
+    .map((n) => Number.parseInt(n, 10));
+  if (bunMajor < 1 || (bunMajor === 1 && bunMinor < 4)) {
+    throw new Error(
+      `mnemyx needs Bun >= 1.4 (found ${Bun.version}) — upgrade: curl -fsSL https://bun.sh/install | bash`
+    );
+  }
+  console.log(`[1/4] Runtime: Bun ${Bun.version} ✓`);
+  runPreflightWarnings();
     console.log(`      DB:      ${getDefaultDbPath()}`);
     console.log(`      Config:  ${getConfigPath()}\n`);
 
@@ -284,19 +362,33 @@ async function cmdInit(rawArgs: string[]): Promise<number> {
     if (flags.noHook) {
       console.log(`      skipped (--no-hook). Add it later from the README.\n`);
     } else {
-      const shell = detectShell(flags.shell);
-      const rc = rcPath(shell);
-      if (hookInstalled(rc)) {
-        console.log(`      already installed in ${rc} — nothing to do.\n`);
+      // Unrecognized $SHELL (fish, dash, …) resolves to null: never guess
+      // which rc file to edit — ask, or skip (non-interactive safe default).
+      let shell = detectShell(flags.shell);
+      if (shell === null && !flags.yes) {
+        const choice = await askText(
+          `      Unrecognized shell (${process.env.SHELL || "unknown"}); mnemyx hooks support zsh/bash only. Which rc file? [zsh/bash/skip] `
+        );
+        const norm = choice.trim().toLowerCase();
+        if (norm.startsWith("z")) shell = "zsh";
+        else if (norm.startsWith("b")) shell = "bash";
+      }
+      if (shell === null) {
+        console.log(`      skipped (unrecognized shell; hooks support zsh/bash — see README).\n`);
       } else {
-        console.log(`      This appends a ~15-line snippet to ${rc}.`);
-        console.log(`      It logs {"ts","exit","cmd"} lines to ~/.mnemyx/exit-codes.log — local only.`);
-        const ok = flags.yes || (await ask(`      Install the ${shell} hook?`));
-        if (ok) {
-          installHook(rc, shell);
-          console.log(`      installed. Reload with: source ${rc}\n`);
+        const rc = rcPath(shell);
+        if (hookInstalled(rc)) {
+          console.log(`      already installed in ${rc} — nothing to do.\n`);
         } else {
-          console.log(`      skipped. Add it later from the README.\n`);
+          console.log(`      This appends a ~15-line snippet to ${rc}.`);
+          console.log(`      It logs {"ts","exit","cmd"} lines to ~/.mnemyx/exit-codes.log — local only.`);
+          const ok = flags.yes || (await ask(`      Install the ${shell} hook?`));
+          if (ok) {
+            installHook(rc, shell);
+            console.log(`      installed. Reload with: source ${rc}\n`);
+          } else {
+            console.log(`      skipped. Add it later from the README.\n`);
+          }
         }
       }
     }

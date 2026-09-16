@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -18,6 +18,7 @@ import {
   getCommandsByIds,
   countEmbeddings,
   pruneStaleEmbeddings,
+  dbPathFor,
   type HistoryEntry,
 } from "./db.ts";
 import { EMBEDDING_DIMS } from "./embeddings.ts";
@@ -224,4 +225,64 @@ test("getCommandsByIds fetches the requested set", () => {
   const rows = getCommandsByIds([2, 1, 999]);
   expect(rows.map((r) => r.command).sort()).toEqual(["deploy a", "deploy b"]);
   expect(getCommandsByIds([])).toEqual([]);
+});
+
+test("dbPathFor covers macOS, Linux+XDG, and fallback identically", () => {
+  expect(dbPathFor("darwin", "/Users/a", undefined)).toBe(
+    "/Users/a/Library/Application Support/mnemyx/mnemyx.db"
+  );
+  expect(dbPathFor("linux", "/home/a", "/data")).toBe(
+    "/data/mnemyx/mnemyx.db"
+  );
+  expect(dbPathFor("linux", "/home/a", undefined)).toBe(
+    "/home/a/.local/share/mnemyx/mnemyx.db"
+  );
+});
+
+test("fresh DB files are owner-only; concurrent writers wait (busy_timeout)", async () => {
+  const p = dbPath();
+  initDb(p);
+  bulkInsert([entry("seed row", 1)]);
+  // A separate process holds a write lock for ~1.2s. Without busy_timeout
+  // the bulkInsert below would throw SQLITE_BUSY immediately; with it, it
+  // waits and succeeds. Readiness file gates out startup races.
+  const ready = `${p}.lockready`;
+  const holder = Bun.spawn(
+    [
+      "bun",
+      "-e",
+      `
+      const { Database } = await import("bun:sqlite");
+      const { writeFileSync } = await import("node:fs");
+      const db = new Database(${JSON.stringify(p)});
+      db.run("BEGIN IMMEDIATE");
+      writeFileSync(${JSON.stringify(ready)}, "locked");
+      await Bun.sleep(1200);
+      db.run("ROLLBACK");
+      db.close();
+      `,
+    ],
+    { stdout: "ignore", stderr: "ignore" }
+  );
+  const deadline = Date.now() + 10000;
+  while (!Bun.file(ready).size && Date.now() < deadline) {
+    await Bun.sleep(50);
+  }
+  expect(Bun.file(ready).size).toBeGreaterThan(0);
+  expect(bulkInsert([entry("concurrent row", 2)])).toBe(1);
+  await holder.exited;
+  expect(searchCommands("concurrent row", 5)).toHaveLength(1);
+  closeDb();
+  expect(statSync(p).mode & 0o777).toBe(0o600);
+}, 20000);
+
+test("NFD input normalizes to NFC so macOS filenames match queries", () => {
+  initDb(dbPath());
+  const nfd = "café".normalize("NFD");
+  expect(nfd).not.toBe("café");
+  bulkInsert([entry(`open ${nfd}`, 1)]);
+  // NFC query finds the NFD-stored command.
+  expect(searchCommands("café", 10).map((r) => r.command)).toEqual([
+    "open café",
+  ]);
 });

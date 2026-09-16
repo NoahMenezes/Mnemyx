@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import {
   loadConfig,
   firstToken,
+  requireHome,
   DEFAULT_DENYLIST,
 } from "./config.ts";
 
@@ -91,4 +92,14 @@ test("firstToken lowercases and takes the command name", () => {
   expect(firstToken("ls -la /tmp")).toBe("ls");
   expect(firstToken("")).toBe("");
   expect(firstToken("   ")).toBe("");
+});
+
+test("requireHome prefers HOME, falls back, then throws actionably", () => {
+  expect(requireHome({ HOME: "/tmp/x" })).toBe("/tmp/x");
+  expect(requireHome({ HOME: "" }, () => "/fallback")).toBe("/fallback");
+  expect(() =>
+    requireHome({}, () => {
+      throw new Error("no passwd entry");
+    })
+  ).toThrow(/set HOME/);
 });
