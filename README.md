@@ -33,8 +33,8 @@ bunx tsc --noEmit
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `search_history` | `query: string`, `limit?: number` (default 20, max 100) | Keyword search over past commands, newest first |
-| `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, for general context |
+| `search_history` | `query: string`, `limit?: number` (default 20, max 100) | Full-text ranked keyword search, most relevant first; noise commands filtered |
+| `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, for general context (noise filtered) |
 
 Example — "have I fixed this docker error before?":
 
@@ -59,6 +59,16 @@ Both detected automatically — whichever files exist on disk are indexed and me
 | bash | `~/.bash_history` | One command per line; file mtime as approximate timestamp |
 
 Each result is tagged with `source_file` **and** `shell` so you can see provenance. Bash timestamps are marked `(approx. time)` since that format stores no timestamps.
+
+## Search quality (Phase 2)
+
+- **Full-text search**: `search_history` uses SQLite FTS5 with BM25 ranking instead of substring matching. Multi-word queries narrow results (`git commit` requires both words), and each word prefix-matches (`commi` finds `commit`). Queries containing no searchable words (e.g. only symbols like `&&`) fall back to substring matching so the tool never breaks.
+- **Noise filtering**: commands whose first word is in the denylist (`ls`, `cd`, `clear`, `pwd`, `exit`, …) are excluded from both tools. Extend the list in `~/.mnemyx/config.json` (optional — missing file just means built-ins):
+  ```json
+  { "denylist": ["vim", "nano", "htop"] }
+  ```
+  Your entries are *added to* the built-ins, never replace them. Edits take effect immediately, no restart needed.
+- **Consecutive de-duplication**: identical back-to-back commands within one history file are collapsed to one row at import time (`ls` × 5 keeps a single entry).
 
 ## Register with Claude Code
 
@@ -93,14 +103,15 @@ Re-imports are idempotent (`INSERT OR IGNORE` on `(command, timestamp, source_fi
 
 ```text
 src/
-  db.ts             # bun:sqlite schema, bulk import, LIKE search, formatting
+  config.ts           # denylist defaults + ~/.mnemyx/config.json loader
+  db.ts               # bun:sqlite schema, FTS5 index, ranked search, formatting
   historyParser.ts  # zsh + bash parsers + auto-detect merge
   index.ts          # MCP stdio server: startup import + 2 tools
 ```
 
 ## Non-goals (later phases)
 
-- Phase 2: SQLite FTS5 search, noise denylist, consecutive-dupe filtering
 - Phase 3: exit-code capture via shell hooks (`exit_code` column)
-- Embeddings / semantic search
+- Phase 4: local embeddings for semantic search (FTS5 remains as fallback)
+- Phase 5: full config file, `mnemyx init` CLI, npm publish
 - Any networking, cloud sync, or telemetry

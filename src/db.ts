@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { loadConfig, firstToken } from "./config.ts";
 
 // Supported shells. Phase 1 scope: zsh + bash on macOS/Linux only.
 export type SupportedShell = "zsh" | "bash";
@@ -75,6 +76,39 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_commands_timestamp ON commands(timestamp DESC);`
   );
+  // Phase 2: full-text index over the command text. External-content FTS5
+  // table keyed to commands.id; triggers keep it in sync on every write,
+  // so normal INSERT/DELETE paths need no FTS-aware code.
+  db.run(
+    `CREATE VIRTUAL TABLE IF NOT EXISTS commands_fts USING fts5(command, content='commands', content_rowid='id', tokenize='unicode61');`
+  );
+  db.run(
+    `CREATE TRIGGER IF NOT EXISTS commands_ai AFTER INSERT ON commands BEGIN
+       INSERT INTO commands_fts(rowid, command) VALUES (new.id, new.command);
+     END;`
+  );
+  db.run(
+    `CREATE TRIGGER IF NOT EXISTS commands_ad AFTER DELETE ON commands BEGIN
+       INSERT INTO commands_fts(commands_fts, rowid, command) VALUES ('delete', old.id, old.command);
+     END;`
+  );
+  db.run(
+    `CREATE TRIGGER IF NOT EXISTS commands_au AFTER UPDATE ON commands BEGIN
+       INSERT INTO commands_fts(commands_fts, rowid, command) VALUES ('delete', old.id, old.command);
+       INSERT INTO commands_fts(rowid, command) VALUES (new.id, new.command);
+     END;`
+  );
+  // Backfill for DBs created before FTS existed (rebuild is idempotent).
+  const cmdCount = (
+    db.query(`SELECT COUNT(*) AS n FROM commands;`).get() as { n: number }
+  ).n;
+  const ftsCount = (
+    db.query(`SELECT COUNT(*) AS n FROM commands_fts;`).get() as { n: number }
+  ).n;
+  if (ftsCount !== cmdCount) {
+    db.run(`INSERT INTO commands_fts(commands_fts) VALUES('rebuild');`);
+    console.error(`[mnemyx] rebuilt FTS index (${cmdCount} rows)`);
+  }
   return db;
 }
 
@@ -163,23 +197,50 @@ export function bulkInsert(entries: HistoryEntry[]): number {
   return insertMany(entries);
 }
 
-// Phase 1 keyword search: case-insensitive substring match via SQL LIKE.
-// FTS5 ranking comes in Phase 2; embeddings (if ever) later still.
+// Phase 2 keyword search: SQLite FTS5 full-text match with BM25 ranking.
+// The user query is tokenized to alphanumeric words; each becomes a prefix
+// term (`commit*` matches `commit`), joined with AND so multi-word queries
+// narrow instead of widen. Tokens are extracted by regex (never interpolated
+// raw), so FTS5 operator characters in user input can't break the query.
+// Queries with no searchable tokens (e.g. only symbols like "&&") fall back
+// to the Phase 1 LIKE match so the tool never returns nothing spuriously.
+function buildFtsMatch(query: string): string | null {
+  const tokens = query.toLowerCase().match(/[a-z0-9]+/g);
+  if (!tokens || tokens.length === 0) return null;
+  return tokens
+    .slice(0, 10)
+    .map((t) => `${t}*`)
+    .join(" AND ");
+}
+
+// Noise filter: drop rows whose command name (first token) is denied.
+// We over-fetch from SQLite, then filter + slice, so `limit` still means
+// "N usable results" from the caller's perspective.
+function applyDenylist(rows: CommandRow[], limit: number): CommandRow[] {
+  const denied = new Set(loadConfig().denylist);
+  const out: CommandRow[] = [];
+  for (const r of rows) {
+    if (denied.has(firstToken(r.command))) continue;
+    out.push(r);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// Over-fetch multiplier so post-filter results still fill `limit`.
+function fetchSize(wanted: number): number {
+  return Math.min(wanted * 3 + 10, 500);
+}
+
 export function searchCommands(
   query: string,
   limit?: number
 ): CommandRow[] {
   const trimmed = query.trim();
   if (!trimmed) return [];
-  const rows = getDb()
-    .query(
-      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp
-       FROM commands
-       WHERE command LIKE '%' || ? || '%' ESCAPE '\\'
-       ORDER BY timestamp DESC
-       LIMIT ?`
-    )
-    .all(escapeLike(trimmed), clampLimit(limit, 20)) as {
+  const wanted = clampLimit(limit, 20);
+  const match = buildFtsMatch(trimmed);
+  let rows: {
     id: number;
     command: string;
     timestamp: number;
@@ -187,11 +248,34 @@ export function searchCommands(
     shell: string;
     is_approximate_timestamp: number;
   }[];
-  return rows.map(rowToEntry);
+  if (match === null) {
+    rows = getDb()
+      .query(
+        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp
+         FROM commands
+         WHERE command LIKE '%' || ? || '%' ESCAPE '\\'
+         ORDER BY timestamp DESC
+         LIMIT ?`
+      )
+      .all(escapeLike(trimmed), fetchSize(wanted)) as typeof rows;
+  } else {
+    rows = getDb()
+      .query(
+        `SELECT c.id, c.command, c.timestamp, c.source_file, c.shell, c.is_approximate_timestamp
+         FROM commands_fts f JOIN commands c ON c.id = f.rowid
+         WHERE commands_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?`
+      )
+      .all(match, fetchSize(wanted)) as typeof rows;
+  }
+  return applyDenylist(rows.map(rowToEntry), wanted);
 }
 
 // Most recent commands, no query needed — useful for general context.
+// Denylist applies here too (recents full of `ls`/`cd` help nobody).
 export function getRecentCommands(limit?: number): CommandRow[] {
+  const wanted = clampLimit(limit, 10);
   const rows = getDb()
     .query(
       `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp
@@ -199,7 +283,7 @@ export function getRecentCommands(limit?: number): CommandRow[] {
        ORDER BY timestamp DESC
        LIMIT ?`
     )
-    .all(clampLimit(limit, 10)) as {
+    .all(fetchSize(wanted)) as {
     id: number;
     command: string;
     timestamp: number;
@@ -207,7 +291,7 @@ export function getRecentCommands(limit?: number): CommandRow[] {
     shell: string;
     is_approximate_timestamp: number;
   }[];
-  return rows.map(rowToEntry);
+  return applyDenylist(rows.map(rowToEntry), wanted);
 }
 
 // Format rows for an LLM to read: newest first, with date, shell, provenance.

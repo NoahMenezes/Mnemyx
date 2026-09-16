@@ -154,6 +154,21 @@ export function parsePlainHistory(
 // Never throws for a missing/unreadable file — most users have 1-2 shells.
 // ---------------------------------------------------------------------------
 
+// Phase 2: drop identical CONSECUTIVE commands within one file's entries
+// (e.g. `ls` five times in a row keeps one). Exact whole-command match;
+// `ls` vs `ls -la` are different and both kept. First occurrence wins.
+// Applied per file before merging, since adjacency across two different
+// files is meaningless.
+export function dedupeConsecutive(entries: HistoryEntry[]): HistoryEntry[] {
+  const out: HistoryEntry[] = [];
+  for (const e of entries) {
+    const last = out[out.length - 1];
+    if (last !== undefined && last.command === e.command) continue;
+    out.push(e);
+  }
+  return out;
+}
+
 export function parseAllAvailableHistory(): HistoryEntry[] {
   // Log context only; we probe ALL candidates regardless of $SHELL because
   // users commonly have both zsh and bash history on disk.
@@ -186,7 +201,15 @@ export function parseAllAvailableHistory(): HistoryEntry[] {
       console.error(
         `[mnemyx] indexed ${entries.length} commands from ${source.path} (${source.shell})`
       );
-      all.push(...entries);
+      const before = entries.length;
+      const deduped = dedupeConsecutive(entries);
+      const dropped = before - deduped.length;
+      if (dropped > 0) {
+        console.error(
+          `[mnemyx] dropped ${dropped} consecutive duplicates from ${source.path}`
+        );
+      }
+      all.push(...deduped);
     } catch (err) {
       // Skip gracefully — a single unreadable file must not kill the server.
       console.error(

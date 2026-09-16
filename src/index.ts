@@ -20,7 +20,7 @@ const server = new McpServer({
 
 server.tool(
   "search_history",
-  "Search your past shell commands by keyword. Returns matching commands with timestamps, shell, and source file, newest first.",
+  "Search your past shell commands by keyword. Full-text ranked search over command text, newest most-relevant first; common noise commands (ls, cd, clear, …) are filtered out.",
   {
     query: z.string().describe("Keyword to search for in past commands"),
     limit: z
