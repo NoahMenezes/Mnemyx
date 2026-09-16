@@ -152,6 +152,11 @@ Notes:
 |---|---|---|
 | `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`) | Natural-language semantic search over your history (local embeddings) with FTS5 keyword fallback. Proven exit-0 commands rank first; hits annotated `[exit N]` when the outcome is known |
 | `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, chronological (noise filtered, outcomes annotated) |
+| `search_commits` | `query: string`, `limit?: number` (default 20, max 100) | Keyword search over indexed git commit messages + file lists, across all repos. Hits carry short hash, date, files, and `repo:` path |
+| `get_commit_context` | `commit_hash: string` (full or ≥7-char prefix) | One commit: message, date, files, repo, plus on-demand `git show --stat` |
+| `get_commit_story` | `commit_hash: string`, `window_minutes?: number` (default 30, max 180) | Commit context PLUS the shell commands from the window before it — timeline of what you did, then what you committed. Time-only match (see below) |
+| `explain_line` | `repo_path: string`, `file_path: string` (relative), `line_number: number` | Flagship: `git blame` finds who touched the line, then returns that commit's story. Answers "why does this line exist" |
+| `reindex_repos` | — | Re-scan `repoRoots` + index new commits (idempotent). Run after committing |
 
 Usage examples (as you'd prompt your assistant):
 
@@ -159,6 +164,8 @@ Usage examples (as you'd prompt your assistant):
 - *"Use mnemyx search_history for 'usermod', only successful ones"* → just the commands proven to exit 0.
 - *"Use mnemyx search_history for 'commi' in keyword mode"* → prefix-matched `git commit` rows (exact-token search, no semantics).
 - *"Use mnemyx get_recent_commands to see what I was doing"* → recent context, noise (`ls`, `cd`) filtered out.
+- *"Use mnemyx search_commits for 'phase 5'"* → your `aad7b9a phase 5 done` commit with files + repo.
+- *"Use mnemyx explain_line for README.md line 1 in this repo"* → blamed commit + diff stat + what you ran before it.
 
 ## How it works
 
@@ -166,7 +173,7 @@ Usage examples (as you'd prompt your assistant):
 
 **Search in layers.** `auto` mode tries vectors first, then FTS5 BM25 keyword ranking (multi-word queries AND-narrow, prefix matching), then substring match for symbol-only queries — the tool always returns *something* rather than erroring. `only_successful: true` restricts to proven exit-0 rows (unknown outcomes are excluded: unknown ≠ worked).
 
-**Outcome signal (optional hook).** A ~15-line `precmd`/`PROMPT_COMMAND` snippet logs `{"ts","exit","cmd"}` lines to `~/.mnemyx/exit-codes.log`. Each history row keeps its most recent observed exit code; ranking tiers successes → unknowns → failures. Install via `mnemyx init` (asks first) or copy from the snippet below. To fully uninstall, remove the block from your rc file (a `{"exitCodes": false}` config only stops *reading* the log).
+**Outcome signal (optional hook).** A ~20-line `precmd`/`PROMPT_COMMAND` snippet logs `{"ts","exit","cmd","cwd","repo"}` lines to `~/.mnemyx/exit-codes.log` (`repo` is the enclosing `git rev-parse --show-toplevel`, empty outside a repo). Each history row keeps its most recent observed exit code; ranking tiers successes → unknowns → failures, and commit stories prefer same-repo commands. Install via `mnemyx init` (asks first) or copy from the snippet below. v1 hooks (no `cwd`) keep working but stay time-only — re-run `mnemyx init` to upgrade in place. To fully uninstall, remove the block from your rc file (a `{"exitCodes": false}` config only stops *reading* the log).
 
 ```sh
 # zsh (~/.zshrc) — full snippet; bash version in `mnemyx init` / source
@@ -174,9 +181,12 @@ _mnemyx_precmd() {
   local code=$?
   local cmd
   cmd=$(fc -ln -1 2>/dev/null | sed -e 's/^[[:space:]]*//')
+  local cwd repo
+  cwd=$(pwd 2>/dev/null)
+  repo=$(git rev-parse --show-toplevel 2>/dev/null)
   if [ -n "$cmd" ]; then
-    MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" python3 -c \
-      'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"]}))' \
+    MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" MNEMYX_CWD="$cwd" MNEMYX_REPO="$repo" python3 -c \
+      'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"],"cwd":os.environ.get("MNEMYX_CWD") or "","repo":os.environ.get("MNEMYX_REPO") or ""}))' \
       >> "$HOME/.mnemyx/exit-codes.log" 2>/dev/null
   fi
   return "$code"
@@ -198,6 +208,52 @@ Shell history contains pasted credentials, and tool output goes straight to an A
 Design notes: the DB keeps true text (so you can still *find* "the deploy using that key"), masking happens in `formatRows()` — the single choke point all tools share. Ordinary commands pass through byte-identical (guarded by tests). Extend with your own JS regexes via `redactPatterns` in config; invalid patterns warn and skip, never break output.
 
 **Semantic search (local ONNX).** `Xenova/all-MiniLM-L6-v2` int8-quantized (384 dims) embeds commands to SQLite BLOBs; cosine similarity ranks them. The server serves immediately on the keyword path while missing rows embed in the background. Vectors are tagged with the exact model id, so switching models later prunes and re-embeds automatically. One constant (`EMBEDDING_DTYPE: "q8"` → `"fp32"`) scales quality up.
+
+## Git integration (Phase 6)
+
+Mnemyx correlates shell history with local git history, so the AI answers "what actually changed" not just "what did I run".
+
+**How it works.** On startup (background, like embeddings) and on every `mnemyx init`, the server discovers repos under `repoRoots` (`~/.mnemyx/config.json`, defaults `~/dev ~/projects ~/code ~/Desktop`, depth 3, symlink-safe) and runs **one** `git log` per repo (capped at 2000 commits) into a `commits` table — hash, message, author time, file list. Full diffs are never stored; `git show --stat` runs on demand. No git library, no network, failures skip with a warning.
+
+**Correlation is repo-aware when the v2 hook is active, time-only otherwise.** zsh/bash history records no cwd, so without hook context `get_commit_story` matches commands by timestamp window (default 30 min before the commit) and says so. With the v2 hook, same-repo commands sort first and the story notes it — read remaining entries as "around then", not "in this repo".
+
+**Guide:**
+
+1. `mnemyx init` → `commits: +N new (M seen across R repos)`. Zero repos? Add roots to config.
+2. In your client: `search_commits for 'phase 5'` → commits with `repo:` paths.
+3. `get_commit_story` on a hash → message + diff stat + commands timeline.
+4. `explain_line` on `repo_path` + relative `file_path` + `line_number` → blamed commit + story. Path traversal (`../`) is rejected; stale index says "run `reindex_repos`" instead of "not found".
+5. After committing, run `reindex_repos` (tool) or `mnemyx init` to make it searchable.
+
+## Architecture
+
+```text
+                    +------------------- ~/.zsh_history / ~/.bash_history
+                    |                   ~/.mnemyx/exit-codes.log (hook)
+                    v                   git repos under repoRoots
+            +-------+-------+  git log  +------+--------+
+            |  historyParser |  exitLog  | repoScanner  | gitIndexer (1 spawn/repo)
+            +-------+--------+-----------+------+-------+
+                    |                          |
+                    v                          v
+            +-------+--------+          +------+-------+
+            |  commands      |          |  commits     |   bun:sqlite (WAL)
+            |  commands_fts  |          |  (hash, msg, |
+            |  command_embs  |          |   files, ts) |
+            +---+--------+---+          +--+---+-------+
+                |        |                    |   |
+  keyword (FTS5)|        |semantic (ONNX)      |   | blame (git CLI, on demand)
+                |        |                    |   |
+                v        v                    v   v
+            search_history  get_recent   search/get_/explain_/reindex
+            get_recent_cmds              _commits/_story/_line/_repos
+                                 |
+                                 v
+                     MCP stdio server (index.ts)
+                     CLI: init / status / bench (cli.ts)
+```
+
+Data flows one way (files → SQLite → tools); secrets are masked at the single choke point `formatRows()` / `sanitizeForDisplay`. Every stage degrades: no hook → unknown exits, no model → keyword, no repos → history tools unaffected.
 
 ## Configuration
 
@@ -247,7 +303,7 @@ Design notes: the DB keeps true text (so you can still *find* "the deploy using 
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 58 tests, hermetic (temp DBs/configs, stubbed model) — must be green
+bun test             # 92 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
@@ -261,15 +317,17 @@ bun run src/cli.ts status   # health check against your real data
 
 ```text
 src/
-  index.ts          # MCP stdio server: import pipeline + search_history / get_recent_commands
+  index.ts          # MCP stdio server: import pipeline + 7 tools (history + git)
   cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
-  db.ts             # bun:sqlite schema + migrations, FTS5 index, vector store, ranked search
+  db.ts             # bun:sqlite schema + migrations, FTS5 index, vector store, ranked search, commits
   historyParser.ts  # zsh extended + bash plain parsers, dedupe, auto-detect merge
   exitLog.ts        # exit-code log path + tolerant JSONL parser
   embeddings.ts     # local ONNX embedder, background backfill, cosine search
-  config.ts         # ~/.mnemyx/config.json loader (all keys)
+  config.ts         # ~/.mnemyx/config.json loader (all keys, incl. repoRoots)
   repoScanner.ts    # Phase 6: discover git repos under repoRoots (depth-capped, never throws)
+  gitIndexer.ts     # Phase 6: one-spawn-per-repo git log index + on-demand diff stat + blame
+  correlate.ts      # Phase 6: time-window stories + line explanations (time-only caveat)
   redact.ts         # secrets redaction for tool output (store raw, display masked)
   hook.ts           # shell-hook snippets + consent-gated installer
   *.test.ts         # hermetic suite: bun test (temp DBs, fixture strings, stub model)

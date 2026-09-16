@@ -7,10 +7,24 @@ import {
   formatRows,
   countEmbeddings,
   closeDb,
+  searchCommits,
+  formatCommits,
+  countCommits,
 } from "./db.ts";
 import { runImport } from "./import.ts";
 import { getExitLogPath } from "./exitLog.ts";
 import { loadConfig } from "./config.ts";
+import {
+  indexAllRepos,
+  getDiffStat,
+} from "./gitIndexer.ts";
+import {
+  getCommandsNearCommit,
+  resolveCommit,
+  formatCommitStory,
+  explainLine,
+  clampWindowMinutes,
+} from "./correlate.ts";
 import {
   semanticSearch,
   backfillMissingEmbeddings,
@@ -104,6 +118,149 @@ server.tool(
   }
 );
 
+server.tool(
+  "search_commits",
+  "Search indexed git commit messages and file lists across your local repos. Returns hash, date, message, files, and repo path so results are attributable.",
+  {
+    query: z.string().describe("Keyword query over commit messages and file paths"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Max results to return (default 20, max 100)"),
+  },
+  async ({ query, limit }) => {
+    const rows = searchCommits(query, limit ?? 20);
+    return { content: [{ type: "text" as const, text: formatCommits(rows) }] };
+  }
+);
+
+server.tool(
+  "get_commit_context",
+  "Show what one commit changed: message, date, files, repo, plus an on-demand diff stat from local git. Accepts a full hash or short prefix (min 7 hex chars).",
+  {
+    commit_hash: z.string().describe("Full commit hash or short prefix"),
+  },
+  async ({ commit_hash }) => {
+    const commit = resolveCommit(commit_hash);
+    if (!commit) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No indexed commit matches ${JSON.stringify(commit_hash)}. The index may be stale — run reindex_repos and retry.`,
+          },
+        ],
+      };
+    }
+    const story = formatCommitStory(commit, [], getDiffStat(commit.repoPath, commit.hash));
+    return { content: [{ type: "text" as const, text: story }] };
+  }
+);
+
+server.tool(
+  "get_commit_story",
+  "Commit context PLUS the shell commands you ran in the time window before it — a rough timeline of what you did, then what you committed. Time-only match (no cwd tracking yet), so treat commands as 'around then', not 'in this repo'.",
+  {
+    commit_hash: z.string().describe("Full commit hash or short prefix"),
+    window_minutes: z
+      .number()
+      .int()
+      .min(1)
+      .max(180)
+      .optional()
+      .describe("Lookback window in minutes (default 30, max 180)"),
+  },
+  async ({ commit_hash, window_minutes }) => {
+    const commit = resolveCommit(commit_hash);
+    if (!commit) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No indexed commit matches ${JSON.stringify(commit_hash)}. The index may be stale — run reindex_repos and retry.`,
+          },
+        ],
+      };
+    }
+    const window = clampWindowMinutes(window_minutes ?? 30);
+    const story = formatCommitStory(
+      commit,
+      getCommandsNearCommit(commit, window),
+      getDiffStat(commit.repoPath, commit.hash)
+    );
+    return { content: [{ type: "text" as const, text: story }] };
+  }
+);
+
+server.tool(
+  "explain_line",
+  "Why does this line exist? Runs git blame on the file/line, then returns the responsible commit plus the story of what you ran around then. repo_path must be an indexed repo; file_path is relative to it.",
+  {
+    repo_path: z.string().describe("Absolute path of the repo"),
+    file_path: z.string().describe("File path relative to the repo root"),
+    line_number: z.number().int().min(1).describe("1-based line number"),
+  },
+  async ({ repo_path, file_path, line_number }) => {
+    const { blamedHash, commit } = explainLine(repo_path, file_path, line_number);
+    if (blamedHash === null) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Could not blame ${file_path}:${line_number} in ${repo_path} (untracked file, bad line, or not a git repo).`,
+          },
+        ],
+      };
+    }
+    if (!commit) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Line blamed to ${blamedHash.slice(0, 7)}, but that commit is not indexed — run reindex_repos and retry.`,
+          },
+        ],
+      };
+    }
+    const story = formatCommitStory(
+      commit,
+      getCommandsNearCommit(commit),
+      getDiffStat(commit.repoPath, commit.hash)
+    );
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Line ${line_number} of ${file_path} last touched by:\n\n${story}`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "reindex_repos",
+  "Re-scan configured repo roots and index new git commits. Idempotent — re-runs insert nothing new. Run after committing to make fresh commits searchable.",
+  {},
+  async () => {
+    const r = indexAllRepos();
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            r.repos === 0
+              ? "No repos discovered under repoRoots — check ~/.mnemyx/config.json."
+              : `Indexed ${r.repos} repos: ${r.commitsAdded} new commits (${r.commitsSeen} seen)${r.errors > 0 ? `, ${r.errors} skipped` : ""}.`,
+        },
+      ],
+    };
+  }
+);
+
 async function main(): Promise<void> {
   // Shared import pipeline (same code the `mnemyx init` CLI runs).
   const result = runImport();
@@ -154,6 +311,36 @@ async function main(): Promise<void> {
   } else {
     console.error(`[mnemyx] embeddings disabled via config (keyword search only)`);
   }
+  // Phase 6: git indexing runs in the BACKGROUND like embeddings — the
+  // server must serve immediately, never wait on `git log` across repos.
+  // Until it finishes, git tools just report "not indexed / reindex".
+  // Never throws: indexAllRepos counts failures instead of raising.
+  try {
+    const stored = countCommits();
+    if (stored > 0) {
+      console.error(`[mnemyx] commits: ${stored} indexed`);
+    }
+  } catch {
+    // Fresh DB edge: table exists post-migration, but stay quiet on error.
+  }
+  setTimeout(() => {
+    try {
+      const r = indexAllRepos();
+      if (r.repos === 0) {
+        console.error(`[mnemyx] commits: no repos under repoRoots`);
+      } else if (r.commitsAdded > 0) {
+        console.error(
+          `[mnemyx] commits: backfill complete (+${r.commitsAdded} new across ${r.repos} repos)`
+        );
+      } else {
+        console.error(`[mnemyx] commits: index up to date (${r.commitsSeen} seen)`);
+      }
+    } catch (err) {
+      console.error(
+        `[mnemyx] git indexing skipped: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }, 0);
   // 5. Serve over stdio for MCP clients (Claude Code / Desktop / Cursor).
   const transport = new StdioServerTransport();
   await server.connect(transport);

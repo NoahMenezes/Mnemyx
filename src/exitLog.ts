@@ -4,10 +4,13 @@ import { requireHome } from "./config.ts";
 import { readTailWindow } from "./fsutil.ts";
 
 // ---------------------------------------------------------------------------
-// Phase 3: exit-code log written by the opt-in shell hook (see README).
+// Exit-code log written by the opt-in shell hook (see README + hook.ts).
 //
-// The hook appends one JSON object per line after every interactive command:
-//   {"ts": 1720000000, "exit": 0, "cmd": "git push"}
+// The hook appends one JSON object per line after every interactive command.
+// v1 lines: {"ts": 1720000000, "exit": 0, "cmd": "git push"}
+// v2 lines add context: {..., "cwd": "/home/you/proj", "repo": "/home/you/proj"}
+// (repo is "" outside a git checkout). v1 lines keep parsing — cwd/repo
+// simply read back as null (unknown, like a missing exit code).
 //
 // A single fixed path on all platforms (next to the Phase 2 config file)
 // so one copy-paste hook snippet works on both macOS and Linux. The log's
@@ -30,6 +33,23 @@ export interface ExitRecord {
   exit: number;
   /** Unix epoch seconds, when the command finished. */
   timestamp: number;
+  /** Working directory at run time (v2 hook). Null = unknown (v1 lines). */
+  cwd: string | null;
+  /** Enclosing git repo root (v2 hook). Null = unknown or not a repo. */
+  repo: string | null;
+}
+
+// Cap absurd path lengths from a hostile/hand-edited log: the value is
+// stored per row, so one 10MB cwd must not bloat the DB.
+const MAX_CONTEXT_PATH_CHARS = 1024;
+
+function cleanContextPath(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().normalize("NFC");
+  if (trimmed === "") return null;
+  return trimmed.length > MAX_CONTEXT_PATH_CHARS
+    ? trimmed.slice(0, MAX_CONTEXT_PATH_CHARS)
+    : trimmed;
 }
 
 // Parse the log into command -> LATEST observed outcome. Later lines win:
@@ -55,6 +75,8 @@ export function parseExitLog(
         cmd?: unknown;
         exit?: unknown;
         ts?: unknown;
+        cwd?: unknown;
+        repo?: unknown;
       };
       if (typeof obj.cmd !== "string" || !obj.cmd.trim()) {
         skipped++;
@@ -78,6 +100,8 @@ export function parseExitLog(
           typeof obj.ts === "number" && Number.isFinite(obj.ts)
             ? Math.floor(obj.ts)
             : 0,
+        cwd: cleanContextPath(obj.cwd),
+        repo: cleanContextPath(obj.repo),
       });
     } catch {
       skipped++;

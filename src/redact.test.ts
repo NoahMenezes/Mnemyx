@@ -11,6 +11,8 @@ function row(command: string): CommandRow {
     shell: "zsh",
     timestampApproximate: false,
     exitCode: null,
+    cwd: null,
+    repo: null,
   };
 }
 

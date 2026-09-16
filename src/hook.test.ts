@@ -8,9 +8,12 @@ import {
   detectShell,
   rcPath,
   hookInstalled,
+  hookOutdated,
+  upgradeHook,
   installHook,
   HOOK_BEGIN,
   HOOK_END,
+  HOOK_VERSION_TAG,
 } from "./hook.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "mnemyx-hook-test-"));
@@ -27,6 +30,43 @@ test("snippets are self-contained blocks with begin/end markers", () => {
   expect(zshSnippet()).toContain("fc -ln -1");
   expect(bashSnippet()).toContain("PROMPT_COMMAND");
   expect(bashSnippet()).toContain("history 1");
+});
+
+test("v2 snippets capture cwd+repo and carry the version tag", () => {
+  for (const s of [zshSnippet(), bashSnippet()]) {
+    expect(s).toContain(HOOK_VERSION_TAG);
+    expect(s).toContain("MNEMYX_CWD");
+    expect(s).toContain("MNEMYX_REPO");
+    expect(s).toContain("git rev-parse --show-toplevel");
+    expect(s).toContain('"cwd"');
+    expect(s).toContain('"repo"');
+  }
+});
+
+test("hookOutdated detects v1 blocks, upgradeHook replaces in place", () => {
+  const rc = join(dir, ".zshrc-v1");
+  // Simulate a v1 install: same markers, no version tag, user content kept.
+  writeFileSync(
+    rc,
+    `export PATH=/x\n${HOOK_BEGIN}: old header\nold body\n${HOOK_END}\n`
+  );
+  expect(hookInstalled(rc)).toBe(true);
+  expect(hookOutdated(rc)).toBe(true);
+  expect(upgradeHook(rc, "zsh").upgraded).toBe(true);
+  const content = readFileSync(rc, "utf8");
+  expect(content.startsWith("export PATH=/x\n")).toBe(true);
+  expect(content).toContain(HOOK_VERSION_TAG);
+  expect(content).toContain("MNEMYX_CWD");
+  expect(content).not.toContain("old body");
+  // Second run is a no-op.
+  expect(hookOutdated(rc)).toBe(false);
+  expect(upgradeHook(rc, "zsh").upgraded).toBe(false);
+  // No block / missing file: nothing to upgrade.
+  expect(upgradeHook(join(dir, "missing-rc"), "zsh").upgraded).toBe(false);
+  const plain = join(dir, "plain-rc");
+  writeFileSync(plain, "export A=1\n");
+  expect(hookOutdated(plain)).toBe(false);
+  expect(upgradeHook(plain, "zsh").upgraded).toBe(false);
 });
 
 test("detectShell honors override, then $SHELL, null when unrecognized", () => {

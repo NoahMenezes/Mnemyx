@@ -17,6 +17,8 @@ import {
   detectShell,
   rcPath,
   hookInstalled,
+  hookOutdated,
+  upgradeHook,
   installHook,
 } from "./hook.ts";
 import {
@@ -113,6 +115,7 @@ interface StatusInfo {
   commands: number;
   ftsDocs: number;
   vectors: number;
+  commits: number;
   modelId: string;
   configPath: string;
   hookRcFiles: string[];
@@ -125,6 +128,7 @@ function collectStatus(): StatusInfo {
   let commands = 0;
   let ftsDocs = 0;
   let vectors = 0;
+  let commits = 0;
   const dbExists = existsSync(dbPath);
   if (dbExists) {
     // Single read-only handle, no migrations: status must never modify.
@@ -145,6 +149,11 @@ function collectStatus(): StatusInfo {
         ).n;
       } catch {
         vectors = 0; // pre-Phase-4 DB without the vector table
+      }
+      try {
+        commits = (db.query(`SELECT COUNT(*) AS n FROM commits;`).get() as { n: number }).n;
+      } catch {
+        commits = 0; // pre-Phase-6 DB without the commits table
       }
     } finally {
       db.close();
@@ -168,6 +177,7 @@ function collectStatus(): StatusInfo {
     commands,
     ftsDocs,
     vectors,
+    commits,
     modelId: EMBEDDING_MODEL_ID,
     configPath: getConfigPath(),
     hookRcFiles: rcs,
@@ -185,6 +195,7 @@ function printStatus(s: StatusInfo): void {
     console.log(`  commands:   ${s.commands}`);
     console.log(`  FTS index:  ${fts}`);
     console.log(`  vectors:    ${s.vectors} (${s.modelId})`);
+    console.log(`  commits:    ${s.commits} (git history, Phase 6)`);
   }
   console.log(`Config:    ${s.configPath} ${existsSync(s.configPath) ? "" : "(using built-ins)"}`);
   console.log(`  denylist: ${cfg.denylist.length} entries, embeddings: ${cfg.embeddings}, exit codes: ${cfg.exitCodes}, max age: ${cfg.maxHistoryAgeDays === null ? "unlimited" : `${cfg.maxHistoryAgeDays} days`}`);
@@ -356,6 +367,22 @@ async function cmdInit(rawArgs: string[]): Promise<number> {
     } else {
       console.log(`      embeddings disabled via config — keyword search only`);
     }
+    console.log(`      indexing git history (local repos only, idempotent)…`);
+    try {
+      const { indexAllRepos } = await import("./gitIndexer.ts");
+      const git = indexAllRepos();
+      if (git.repos === 0) {
+        console.log(`      commits: no repos under repoRoots — edit ~/.mnemyx/config.json to add some`);
+      } else {
+        console.log(
+          `      commits: +${git.commitsAdded} new (${git.commitsSeen} seen across ${git.repos} repos${git.errors > 0 ? `, ${git.errors} skipped` : ""})`
+        );
+      }
+    } catch (err) {
+      console.log(
+        `      git indexing skipped (${err instanceof Error ? err.message : String(err)}) — shell search works regardless`
+      );
+    }
     console.log();
 
     // 3. Shell hook (explicit consent, never silent).
@@ -378,11 +405,23 @@ async function cmdInit(rawArgs: string[]): Promise<number> {
         console.log(`      skipped (unrecognized shell; hooks support zsh/bash — see README).\n`);
       } else {
         const rc = rcPath(shell);
-        if (hookInstalled(rc)) {
+        if (hookInstalled(rc) && !hookOutdated(rc)) {
           console.log(`      already installed in ${rc} — nothing to do.\n`);
+        } else if (hookInstalled(rc) && hookOutdated(rc)) {
+          // v1 block: still logs exits, but without cwd/repo context.
+          // Upgrade replaces the block in place (consent-gated like install).
+          console.log(`      A v1 hook is installed in ${rc} (logs exits, no directory context).`);
+          console.log(`      Upgrading replaces that block with the v2 snippet (adds cwd + git repo per command).`);
+          const ok = flags.yes || (await ask(`      Upgrade the ${shell} hook?`));
+          if (ok) {
+            upgradeHook(rc, shell);
+            console.log(`      upgraded. Reload with: source ${rc}\n`);
+          } else {
+            console.log(`      kept v1. Upgrade later by re-running mnemyx init.\n`);
+          }
         } else {
-          console.log(`      This appends a ~15-line snippet to ${rc}.`);
-          console.log(`      It logs {"ts","exit","cmd"} lines to ~/.mnemyx/exit-codes.log — local only.`);
+          console.log(`      This appends a ~20-line snippet to ${rc}.`);
+          console.log(`      It logs {"ts","exit","cmd","cwd","repo"} lines to ~/.mnemyx/exit-codes.log — local only.`);
           const ok = flags.yes || (await ask(`      Install the ${shell} hook?`));
           if (ok) {
             installHook(rc, shell);

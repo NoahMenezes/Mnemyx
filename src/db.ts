@@ -28,6 +28,13 @@ export interface CommandRow extends HistoryEntry {
    * installed). Unknown is NOT failure — it just means "no signal".
    */
   exitCode: number | null;
+  /**
+   * Hook v2: where the command ran (working directory / enclosing git
+   * repo root). NULL = unknown (pre-v2 hook or v1 log lines). Latest
+   * observed value per command text — a ranking heuristic, not proof.
+   */
+  cwd: string | null;
+  repo: string | null;
 }
 
 let db: Database | null = null;
@@ -115,6 +122,15 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
   // row (all pre-hook history simply reads back as NULL = unknown).
   if (!colNames.includes("exit_code")) {
     db.run(`ALTER TABLE commands ADD COLUMN exit_code INTEGER;`);
+  }
+  // Hook v2: where the command ran. Nullable like exit_code — pre-v2 rows
+  // read back as NULL = unknown. Latest observation wins per command text
+  // (same last-wins rule as exit codes; a heuristic, documented).
+  if (!colNames.includes("cwd")) {
+    db.run(`ALTER TABLE commands ADD COLUMN cwd TEXT;`);
+  }
+  if (!colNames.includes("repo")) {
+    db.run(`ALTER TABLE commands ADD COLUMN repo TEXT;`);
   }
   // One-time NFC convergence for rows imported before storage normalization:
   // without it, re-imports would INSERT OR IGNORE-miss (NFC text differs
@@ -237,6 +253,26 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_embeddings_model ON command_embeddings(model);`
   );
+  // Phase 6: git commits. One row per (repo, hash). files_changed is a
+  // JSON array of paths (from `git log --name-only`). No full diffs stored
+  // — those are fetched on demand via `git show --stat <hash>`.
+  db.run(
+    `CREATE TABLE IF NOT EXISTS commits (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       hash TEXT NOT NULL,
+       repo_path TEXT NOT NULL,
+       message TEXT NOT NULL,
+       author_ts INTEGER NOT NULL,
+       files_changed TEXT NOT NULL,
+       UNIQUE(hash, repo_path)
+     );`
+  );
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_commits_repo_ts ON commits(repo_path, author_ts DESC);`
+  );
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_commits_ts ON commits(author_ts DESC);`
+  );
   return db;
 }
 
@@ -299,6 +335,8 @@ interface DbRow {
   shell: string;
   is_approximate_timestamp: number;
   exit_code: number | null;
+  cwd: string | null;
+  repo: string | null;
 }
 
 function rowToEntry(row: DbRow): CommandRow {
@@ -310,6 +348,8 @@ function rowToEntry(row: DbRow): CommandRow {
     shell: row.shell as SupportedShell,
     timestampApproximate: row.is_approximate_timestamp === 1,
     exitCode: row.exit_code,
+    cwd: row.cwd ?? null,
+    repo: row.repo ?? null,
   };
 }
 
@@ -444,7 +484,7 @@ export function searchCommands(
   if (match === null) {
     rows = getDb()
       .query(
-        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code
+        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
          FROM commands
          WHERE command LIKE '%' || ? || '%' ESCAPE '\\'
            ${successFilter ? "AND exit_code = 0" : ""}
@@ -455,7 +495,7 @@ export function searchCommands(
   } else {
     rows = getDb()
       .query(
-        `SELECT c.id, c.command, c.timestamp, c.source_file, c.shell, c.is_approximate_timestamp, c.exit_code
+        `SELECT c.id, c.command, c.timestamp, c.source_file, c.shell, c.is_approximate_timestamp, c.exit_code, c.cwd, c.repo
          FROM commands_fts f JOIN commands c ON c.id = f.rowid
          WHERE commands_fts MATCH ?
            ${successFilter ? "AND c.exit_code = 0" : ""}
@@ -475,7 +515,7 @@ export function getRecentCommands(limit?: number): CommandRow[] {
   const wanted = clampLimit(limit, 10);
   const rows = getDb()
     .query(
-      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code
+      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
        FROM commands
        ORDER BY timestamp DESC
        LIMIT ?`
@@ -486,16 +526,24 @@ export function getRecentCommands(limit?: number): CommandRow[] {
 
 // Phase 3: stamp hook-observed outcomes onto matching history rows.
 // Matching is by exact command text; every row with that text gets the
-// LATEST observed exit code (the map is already last-wins). Runs in one
+// LATEST observed exit code (the map is already last-wins). Hook v2 lines
+// additionally carry cwd/repo: those stamp the latest observed location
+// onto matching rows (NULL before any v2 observation). Runs in one
 // transaction; returns the number of rows updated. Re-running with the
-// same log is a true no-op (rows already carrying the value are skipped,
+// same log is a true no-op (rows already carrying the values are skipped,
 // so the FTS sync triggers don't churn either).
 //
 // Counting subtlety: the commands_au FTS trigger fires on every UPDATE,
 // which inflates sqlite changes() — so we count rows-to-change with a
 // SELECT first instead of trusting the UPDATE's change count.
+export interface ExitOutcome {
+  exit: number;
+  cwd?: string | null;
+  repo?: string | null;
+}
+
 export function applyExitCodes(
-  outcomes: Map<string, { exit: number }>
+  outcomes: Map<string, ExitOutcome>
 ): number {
   if (outcomes.size === 0) return 0;
   const database = getDb();
@@ -505,8 +553,16 @@ export function applyExitCodes(
   const updateStmt = database.query(
     `UPDATE commands SET exit_code = ? WHERE command = ? AND (exit_code IS NULL OR exit_code != ?)`
   );
+  const pendingCtxStmt = database.query(
+    `SELECT COUNT(*) AS n FROM commands
+     WHERE command = ? AND (IFNULL(cwd, '') != ? OR IFNULL(repo, '') != ?)`
+  );
+  const updateCtxStmt = database.query(
+    `UPDATE commands SET cwd = ?, repo = ?
+     WHERE command = ? AND (IFNULL(cwd, '') != ? OR IFNULL(repo, '') != ?)`
+  );
   const applyMany = database.transaction(
-    (entries: [string, { exit: number }][]): number => {
+    (entries: [string, ExitOutcome][]): number => {
       let updated = 0;
       for (const [command, outcome] of entries) {
         const pending = (
@@ -515,6 +571,28 @@ export function applyExitCodes(
         if (pending > 0) {
           updateStmt.run(outcome.exit, command, outcome.exit);
           updated += pending;
+        }
+        // v1 lines (no context) skip this entirely: nothing new to stamp.
+        // Empty string would only ever come from hand-edited logs —
+        // normalize to NULL so "unknown" has exactly one representation.
+        const cwd = outcome.cwd?.trim() ? outcome.cwd.trim() : null;
+        const repo = outcome.repo?.trim() ? outcome.repo.trim() : null;
+        if (cwd !== null || repo !== null) {
+          const wantCwd = cwd ?? "";
+          const wantRepo = repo ?? "";
+          const pendingCtx = (
+            pendingCtxStmt.get(command, wantCwd, wantRepo) as { n: number }
+          ).n;
+          if (pendingCtx > 0) {
+            updateCtxStmt.run(
+              cwd,
+              repo,
+              command,
+              wantCwd,
+              wantRepo
+            );
+            updated += pendingCtx;
+          }
         }
       }
       return updated;
@@ -733,11 +811,200 @@ export function getCommandsByIds(ids: number[]): CommandRow[] {
     const placeholders = chunk.map(() => "?").join(",");
     const rows = getDb()
       .query(
-        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code
+        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
          FROM commands WHERE id IN (${placeholders})`
       )
       .all(...chunk) as DbRow[];
     out.push(...rows.map(rowToEntry));
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: git commit storage + queries. Small scale (hundreds per repo),
+// so plain LIKE search is fast enough — no FTS table needed. All writes go
+// through bulkInsertCommits (INSERT OR IGNORE = idempotent re-index).
+// ---------------------------------------------------------------------------
+
+export interface GitCommit {
+  id: number;
+  hash: string;
+  repoPath: string;
+  message: string;
+  /** Author timestamp, unix seconds. */
+  authorTs: number;
+  filesChanged: string[];
+}
+
+export interface NewCommit {
+  hash: string;
+  repoPath: string;
+  message: string;
+  authorTs: number;
+  filesChanged: string[];
+}
+
+interface CommitDbRow {
+  id: number;
+  hash: string;
+  repo_path: string;
+  message: string;
+  author_ts: number;
+  files_changed: string;
+}
+
+function commitRowToEntry(row: CommitDbRow): GitCommit {
+  let files: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(row.files_changed);
+    if (Array.isArray(parsed)) {
+      files = parsed.filter((x): x is string => typeof x === "string");
+    }
+  } catch {
+    files = [];
+  }
+  return {
+    id: row.id,
+    hash: row.hash,
+    repoPath: row.repo_path,
+    message: row.message,
+    authorTs: row.author_ts,
+    filesChanged: files,
+  };
+}
+
+// Insert commits idempotently. Returns rows newly added (before/after
+// count inside one transaction, same reasoning as bulkInsert).
+export function bulkInsertCommits(rows: NewCommit[]): number {
+  if (rows.length === 0) return 0;
+  const database = getDb();
+  const stmt = database.query(
+    `INSERT OR IGNORE INTO commits
+       (hash, repo_path, message, author_ts, files_changed)
+     VALUES (?, ?, ?, ?, ?)`
+  );
+  const countAll = database.query(`SELECT COUNT(*) AS n FROM commits;`);
+  const insertMany = database.transaction((items: NewCommit[]) => {
+    const before = (countAll.get() as { n: number }).n;
+    for (const c of items) {
+      stmt.run(
+        c.hash,
+        c.repoPath,
+        c.message,
+        c.authorTs,
+        JSON.stringify(c.filesChanged)
+      );
+    }
+    return (countAll.get() as { n: number }).n - before;
+  });
+  return withBusyRetry(() => insertMany(rows));
+}
+
+export function countCommits(): number {
+  return (
+    getDb().query(`SELECT COUNT(*) AS n FROM commits;`).get() as {
+      n: number;
+    }
+  ).n;
+}
+
+// Find commits by full hash or unique prefix (min 7 hex chars). Returns all
+// repos' matches, most recent first — callers disambiguate by repoPath.
+export function getCommitsByHash(prefix: string): GitCommit[] {
+  const p = prefix.trim().toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(p)) return [];
+  const rows = getDb()
+    .query(
+      `SELECT id, hash, repo_path, message, author_ts, files_changed
+       FROM commits WHERE hash LIKE ? ESCAPE '\\' ORDER BY author_ts DESC LIMIT 10`
+    )
+    .all(`${escapeLike(p)}%`) as CommitDbRow[];
+  return rows.map(commitRowToEntry);
+}
+
+// Keyword search over message + file list. LIKE is plenty fast at this
+// scale (hundreds–low-thousands of rows) and needs no extra index.
+export function searchCommits(query: string, limit?: number): GitCommit[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  if (trimmed.length > MAX_QUERY_LENGTH) {
+    throw new Error(
+      `query too long (${trimmed.length} chars, max ${MAX_QUERY_LENGTH})`
+    );
+  }
+  const wanted = clampLimit(limit, 20);
+  const like = `%${escapeLike(trimmed)}%`;
+  const rows = getDb()
+    .query(
+      `SELECT id, hash, repo_path, message, author_ts, files_changed
+       FROM commits
+       WHERE message LIKE ? ESCAPE '\\' OR files_changed LIKE ? ESCAPE '\\'
+       ORDER BY author_ts DESC LIMIT ?`
+    )
+    .all(like, like, Math.min(wanted * 2, 200)) as CommitDbRow[];
+  return rows.slice(0, wanted).map(commitRowToEntry);
+}
+
+export function getRecentCommits(
+  limit?: number,
+  repoPath?: string
+): GitCommit[] {
+  const wanted = clampLimit(limit, 10);
+  const rows =
+    repoPath !== undefined && repoPath !== ""
+      ? (getDb()
+          .query(
+            `SELECT id, hash, repo_path, message, author_ts, files_changed
+             FROM commits WHERE repo_path = ? ORDER BY author_ts DESC LIMIT ?`
+          )
+          .all(repoPath, wanted) as CommitDbRow[])
+      : (getDb()
+          .query(
+            `SELECT id, hash, repo_path, message, author_ts, files_changed
+             FROM commits ORDER BY author_ts DESC LIMIT ?`
+          )
+          .all(wanted) as CommitDbRow[]);
+  return rows.map(commitRowToEntry);
+}
+
+// Commands inside a time window — the correlation primitive. Newest first,
+// denylist-filtered so `ls`/`cd` don't drown the story.
+export function getCommandsInWindow(
+  fromTs: number,
+  toTs: number,
+  limit?: number
+): CommandRow[] {
+  const wanted = clampLimit(limit, 20);
+  const rows = getDb()
+    .query(
+      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
+       FROM commands WHERE timestamp >= ? AND timestamp <= ?
+       ORDER BY timestamp DESC LIMIT ?`
+    )
+    .all(
+      Math.floor(fromTs),
+      Math.floor(toTs),
+      fetchSize(wanted)
+    ) as DbRow[];
+  return applyDenylist(rows.map(rowToEntry), wanted);
+}
+
+// One-line per commit, for LLM consumption. Messages sanitized like
+// commands (history-adjacent text can contain ANSI/control chars).
+export function formatCommits(rows: GitCommit[]): string {
+  if (rows.length === 0) {
+    return "No matching commits found in indexed repos.";
+  }
+  return rows
+    .map((c) => {
+      const date = new Date(c.authorTs * 1000).toISOString();
+      const short = c.hash.slice(0, 7);
+      const files =
+        c.filesChanged.length > 0
+          ? ` (${c.filesChanged.slice(0, 5).join(", ")}${c.filesChanged.length > 5 ? ` +${c.filesChanged.length - 5} more` : ""})`
+          : "";
+      const msg = sanitizeForDisplay(c.message).slice(0, 300);
+      return `- [${date}] ${short} ${msg}${files}\n  repo: ${c.repoPath}`;
+    })
+    .join("\n");
 }

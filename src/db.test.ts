@@ -158,6 +158,40 @@ test("applyExitCodes annotates, counts exactly, reruns as no-op", () => {
   expect(applyExitCodes(new Map([["deploy alpha", { exit: 5 }]]))).toBe(1);
 });
 
+test("applyExitCodes stamps cwd/repo, v1 lines leave NULL, rerun no-ops", () => {
+  initDb(dbPath());
+  bulkInsert([entry("deploy alpha", 1), entry("deploy beta", 2)]);
+  expect(
+    applyExitCodes(
+      new Map([
+        ["deploy alpha", { exit: 0, cwd: "/home/u/proj", repo: "/home/u/proj" }],
+        ["deploy beta", { exit: 0 }],
+      ])
+    )
+  ).toBe(3); // 2 exit stamps + 1 context stamp
+  const [alpha] = searchCommands("deploy alpha", 5);
+  expect(alpha?.cwd).toBe("/home/u/proj");
+  expect(alpha?.repo).toBe("/home/u/proj");
+  const [beta] = searchCommands("deploy beta", 5);
+  expect(beta?.cwd).toBeNull();
+  expect(beta?.repo).toBeNull();
+  // Same log again: true no-op (no FTS churn).
+  expect(
+    applyExitCodes(
+      new Map([
+        ["deploy alpha", { exit: 0, cwd: "/home/u/proj", repo: "/home/u/proj" }],
+        ["deploy beta", { exit: 0 }],
+      ])
+    )
+  ).toBe(0);
+  // Latest wins when the command moves repos.
+  expect(
+    applyExitCodes(new Map([["deploy alpha", { exit: 0, cwd: "/other", repo: null }]]))
+  ).toBe(1);
+  const [moved] = searchCommands("deploy alpha", 5);
+  expect(moved?.cwd).toBe("/other");
+});
+
 test("onlySuccessful filters to proven exit 0; tiers order success first", () => {
   initDb(dbPath());
   bulkInsert([
@@ -318,6 +352,25 @@ test("initDb converges pre-normalization NFD rows (update or drop+carry)", () =>
   ]);
 });
 
+test("initDb migrates pre-v2 DBs with cwd/repo columns", () => {
+  const p = dbPath();
+  const raw = new Database(p);
+  raw.run(
+    "CREATE TABLE commands (id INTEGER PRIMARY KEY AUTOINCREMENT, command TEXT NOT NULL, timestamp INTEGER NOT NULL, source_file TEXT NOT NULL, shell TEXT NOT NULL, is_approximate_timestamp INTEGER NOT NULL DEFAULT 0, exit_code INTEGER, UNIQUE(command, timestamp, source_file));"
+  );
+  raw.query(
+    "INSERT INTO commands (command, timestamp, source_file, shell, is_approximate_timestamp, exit_code) VALUES ('old cmd', 1, 'f', 'zsh', 0, 0)"
+  ).run();
+  raw.close();
+  initDb(p);
+  expect(
+    applyExitCodes(new Map([["old cmd", { exit: 0, cwd: "/r", repo: "/r" }]]))
+  ).toBe(1);
+  const [row] = searchCommands("old cmd", 5);
+  expect(row?.cwd).toBe("/r");
+  expect(row?.exitCode).toBe(0);
+});
+
 function commandRow(command: string): CommandRow {
   return {
     id: 1,
@@ -327,6 +380,8 @@ function commandRow(command: string): CommandRow {
     shell: "zsh",
     timestampApproximate: false,
     exitCode: null,
+    cwd: null,
+    repo: null,
   };
 }
 
