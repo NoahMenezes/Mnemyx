@@ -1,3 +1,8 @@
+# mnemyx local database (per-user, never commit)
+*.db
+*.db-wal
+*.db-shm
+
 # dependencies (bun install)
 node_modules
 
