@@ -68,13 +68,15 @@ export function resolveCommit(hashPrefix: string): GitCommit | null {
   return hits[0] ?? null;
 }
 
-// Format one commit + its story for an LLM: three labelled sections so
+// Format one commit + its story for an LLM: labelled sections so
 // the reader can tell stored fact (message/files) apart from heuristic
-// (time-window commands) apart from on-demand git output (diff stat).
+// (time-window commands) apart from on-demand git output (diff stat,
+// optional full diff preview).
 export function formatCommitStory(
   commit: GitCommit,
   commands: CommandRow[],
-  diffStat: string | null
+  diffStat: string | null,
+  diffPreview: string | null = null
 ): string {
   const date = new Date(commit.authorTs * 1000).toISOString();
   const files =
@@ -89,15 +91,19 @@ export function formatCommitStory(
     `files: ${sanitizeForDisplay(files)}`,
   ].join("\n");
   const stat = diffStat !== null ? `\n\nDiff stat:\n${sanitizeForDisplay(diffStat)}` : "";
+  const preview =
+    diffPreview !== null && diffPreview.trim() !== ""
+      ? `\n\nDiff:\n${diffPreview}`
+      : "";
   if (commands.length === 0) {
-    return `${head}${stat}\n\nWhat I ran around then: no indexed commands in that window.`;
+    return `${head}${stat}${preview}\n\nWhat I ran around then: no indexed commands in that window.`;
   }
   const repoMatched = commands.some((c) => c.repo !== null && c.repo === commit.repoPath);
   const caveat = repoMatched
     ? "top entries ran in this repo (hook-tracked), rest are time-only"
     : "time-only match (no repo-tracked commands yet — upgrade the shell hook)";
   return (
-    `${head}${stat}` +
+    `${head}${stat}${preview}` +
     `\n\nWhat I ran around then (${caveat}):\n${formatRows(commands)}`
   );
 }

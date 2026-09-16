@@ -17,6 +17,8 @@ import { loadConfig } from "./config.ts";
 import {
   indexAllRepos,
   getDiffStat,
+  getCommitGraph,
+  getCommitDiff,
 } from "./gitIndexer.ts";
 import {
   getCommandsNearCommit,
@@ -162,7 +164,7 @@ server.tool(
 
 server.tool(
   "get_commit_story",
-  "Commit context PLUS the shell commands you ran in the time window before it — a rough timeline of what you did, then what you committed. Time-only match (no cwd tracking yet), so treat commands as 'around then', not 'in this repo'.",
+  "Commit context PLUS the shell commands you ran in the time window before it — a rough timeline of what you did, then what you committed. Same-repo commands (v2 hook) sort first; the rest are time-only, so treat them as 'around then'.",
   {
     commit_hash: z.string().describe("Full commit hash or short prefix"),
     window_minutes: z
@@ -172,8 +174,14 @@ server.tool(
       .max(180)
       .optional()
       .describe("Lookback window in minutes (default 30, max 180)"),
+    with_diff: z
+      .boolean()
+      .optional()
+      .describe(
+        "Append a capped unified diff preview (default false — diffs eat context)"
+      ),
   },
-  async ({ commit_hash, window_minutes }) => {
+  async ({ commit_hash, window_minutes, with_diff }) => {
     const commit = resolveCommit(commit_hash);
     if (!commit) {
       return {
@@ -189,7 +197,8 @@ server.tool(
     const story = formatCommitStory(
       commit,
       getCommandsNearCommit(commit, window),
-      getDiffStat(commit.repoPath, commit.hash)
+      getDiffStat(commit.repoPath, commit.hash),
+      with_diff === true ? getCommitDiff(commit.repoPath, commit.hash) : null
     );
     return { content: [{ type: "text" as const, text: story }] };
   }
@@ -258,6 +267,105 @@ server.tool(
         },
       ],
     };
+  }
+);
+
+server.tool(
+  "get_repo_log",
+  "ASCII commit graph for one local repo (branches/merges drawn like git log --graph): hash, date, message per line, newest first. Orientation before diving into a diff.",
+  {
+    repo_path: z.string().describe("Absolute path of the repo"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .optional()
+      .describe("Max commits to show (default 15, max 30)"),
+  },
+  async ({ repo_path, limit }) => {
+    const graph = getCommitGraph(repo_path, limit ?? 15);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            graph ??
+            `No commit graph for ${repo_path} (not a git repo, empty, or unreadable).`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "get_commit_diff",
+  "Unified diff for one commit, rendered like a code-review view: per-file +added −removed counts, @@ hunks, context and +/- lines. Capped (120 lines, 5 files) with truncation markers; secrets masked; binaries collapsed to one line. Works even for commits the index hasn't seen (reads git directly).",
+  {
+    commit_hash: z.string().describe("Full commit hash or short prefix"),
+    repo_path: z
+      .string()
+      .optional()
+      .describe(
+        "Absolute repo path (default: the indexed repo holding the hash; required when the hash is unknown to the index)"
+      ),
+    file: z
+      .string()
+      .optional()
+      .describe("Single file (repo-relative) to diff — narrows big commits"),
+    max_lines: z
+      .number()
+      .int()
+      .min(10)
+      .max(500)
+      .optional()
+      .describe("Max diff lines (default 120, max 500)"),
+  },
+  async ({ commit_hash, repo_path, file, max_lines }) => {
+    const h = commit_hash.trim().toLowerCase();
+    if (!/^[0-9a-f]{7,40}$/.test(h)) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Bad commit hash ${JSON.stringify(commit_hash)} (want 7-40 hex chars).`,
+          },
+        ],
+      };
+    }
+    // Prefer the indexed record: disambiguates short hashes and gives the
+    // repo without asking. Explicit repo_path wins when both are given.
+    const known = resolveCommit(h);
+    const repo = repo_path ?? known?.repoPath;
+    if (!repo) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Unknown commit ${h.slice(0, 7)} and no repo_path given — pass the repo holding it.`,
+          },
+        ],
+      };
+    }
+    const diff = getCommitDiff(repo, h, { file, maxLines: max_lines ?? 120 });
+    if (diff === null) {
+      const hint = known
+        ? "the commit may be missing locally (shallow clone?) or the file filter matches nothing"
+        : "run reindex_repos, or check the hash";
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No diff for ${h.slice(0, 7)} in ${repo} — ${hint}.`,
+          },
+        ],
+      };
+    }
+    const context =
+      known && known.repoPath !== repo
+        ? `Note: showing diff from ${repo} (index also knows ${h.slice(0, 7)} in ${known.repoPath}).\n\n`
+        : "";
+    return { content: [{ type: "text" as const, text: `${context}${diff}` }] };
   }
 );
 

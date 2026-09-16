@@ -8,6 +8,7 @@ import {
   indexRepo,
   indexAllRepos,
   getDiffStat,
+  getCommitGraph,
   blameLine,
 } from "./gitIndexer.ts";
 
@@ -130,4 +131,55 @@ test("indexAllRepos discovers via config file", async () => {
   const r = indexAllRepos(cfg);
   expect(r.repos).toBe(1);
   expect(r.commitsAdded).toBe(2);
+});
+
+function makeBranchRepo(name: string): { repo: string; featureHash: string } {
+  const repo = join(dir, name);
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: repo });
+  writeFileSync(join(repo, "a.txt"), "base\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "base commit"], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "checkout", "-qb", "feature"], { cwd: repo });
+  writeFileSync(join(repo, "a.txt"), "base\nfeature\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "feature work"], { cwd: repo, env: gitEnv() });
+  const featureHash = String(
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout
+  ).trim();
+  Bun.spawnSync(["git", "checkout", "-q", "main"], { cwd: repo });
+  Bun.spawnSync(["git", "merge", "--no-ff", "-qm", "merge feature", "feature"], { cwd: repo, env: gitEnv() });
+  return { repo, featureHash };
+}
+
+test("getCommitGraph draws branches with hashes", () => {
+  const { repo, featureHash } = makeBranchRepo("graphrepo");
+  const graph = getCommitGraph(repo, 10);
+  expect(graph).not.toBeNull();
+  expect(graph as string).toContain("*");
+  expect(graph as string).toContain(featureHash.slice(0, 7));
+  expect(graph as string).toContain("merge feature");
+  expect(getCommitGraph(join(dir, "missing"), 10)).toBeNull();
+  const plain = join(dir, "plain-graph");
+  mkdirSync(plain, { recursive: true });
+  expect(getCommitGraph(plain, 10)).toBeNull();
+});
+
+test("getDiffStat masks secrets in git output", () => {  const repo = join(dir, "secretrepo");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  // Secret lives in the commit MESSAGE (filename-free case).
+  writeFileSync(join(repo, "a.txt"), "x\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "rotate password=hunter2 now"], {
+    cwd: repo,
+    env: gitEnv(),
+  });
+  const hash = String(
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout
+  ).trim();
+  const stat = getDiffStat(repo, hash);
+  expect(stat).not.toBeNull();
+  expect(stat as string).not.toContain("hunter2");
+  expect(stat as string).toContain("[redacted]");
 });
