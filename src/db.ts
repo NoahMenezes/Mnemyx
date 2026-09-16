@@ -79,6 +79,16 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
   // Phase 2: full-text index over the command text. External-content FTS5
   // table keyed to commands.id; triggers keep it in sync on every write,
   // so normal INSERT/DELETE paths need no FTS-aware code.
+  //
+  // Sync-check subtlety (found the hard way): COUNT(*) on an external-content
+  // FTS5 table returns the CONTENT table's row count even when the full-text
+  // index itself is empty — so it can never tell us a rebuild is needed.
+  // We compare against commands_fts_docsize instead (one row per indexed
+  // doc, a plain table with a trustworthy count), and always rebuild when
+  // the FTS table itself is newly created.
+  const ftsExists =
+    db.query(`SELECT 1 FROM sqlite_master WHERE name = 'commands_fts';`).get() !==
+    undefined;
   db.run(
     `CREATE VIRTUAL TABLE IF NOT EXISTS commands_fts USING fts5(command, content='commands', content_rowid='id', tokenize='unicode61');`
   );
@@ -99,14 +109,25 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
      END;`
   );
   // Backfill for DBs created before FTS existed (rebuild is idempotent).
-  const cmdCount = (
-    db.query(`SELECT COUNT(*) AS n FROM commands;`).get() as { n: number }
-  ).n;
-  const ftsCount = (
-    db.query(`SELECT COUNT(*) AS n FROM commands_fts;`).get() as { n: number }
-  ).n;
-  if (ftsCount !== cmdCount) {
+  // A brand-new FTS table is always empty -> rebuild unconditionally.
+  // Otherwise compare against the docsize table (see note above).
+  const needsRebuild = (() => {
+    if (!ftsExists) return true;
+    const cmdCount = (
+      db.query(`SELECT COUNT(*) AS n FROM commands;`).get() as { n: number }
+    ).n;
+    const ftsCount = (
+      db.query(`SELECT COUNT(*) AS n FROM commands_fts_docsize;`).get() as {
+        n: number;
+      }
+    ).n;
+    return ftsCount !== cmdCount;
+  })();
+  if (needsRebuild) {
     db.run(`INSERT INTO commands_fts(commands_fts) VALUES('rebuild');`);
+    const cmdCount = (
+      db.query(`SELECT COUNT(*) AS n FROM commands;`).get() as { n: number }
+    ).n;
     console.error(`[mnemyx] rebuilt FTS index (${cmdCount} rows)`);
   }
   return db;
