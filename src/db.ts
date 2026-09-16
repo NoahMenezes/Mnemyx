@@ -142,6 +142,21 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
     ).n;
     console.error(`[mnemyx] rebuilt FTS index (${cmdCount} rows)`);
   }
+  // Phase 4: one vector per command. Plain table (no extension needed —
+  // ~2000 rows brute-force in JS in milliseconds). command_id references
+  // commands(id); the model tag lets a future model/dtype swap prune and
+  // re-embed without a migration.
+  db.run(
+    `CREATE TABLE IF NOT EXISTS command_embeddings (
+       command_id INTEGER PRIMARY KEY,
+       embedding BLOB NOT NULL,
+       model TEXT NOT NULL,
+       dims INTEGER NOT NULL
+     );`
+  );
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_embeddings_model ON command_embeddings(model);`
+  );
   return db;
 }
 
@@ -158,7 +173,7 @@ function getDb(): Database {
 
 const MAX_LIMIT = 100;
 
-function clampLimit(limit: number | undefined, fallback: number): number {
+export function clampLimit(limit: number | undefined, fallback: number): number {
   if (limit === undefined || !Number.isFinite(limit)) return fallback;
   return Math.min(Math.max(Math.floor(limit), 1), MAX_LIMIT);
 }
@@ -253,8 +268,9 @@ function buildFtsMatch(query: string): string | null {
 
 // Noise filter: drop rows whose command name (first token) is denied.
 // We over-fetch from SQLite, then filter + slice, so `limit` still means
-// "N usable results" from the caller's perspective.
-function applyDenylist(rows: CommandRow[], limit: number): CommandRow[] {
+// "N usable results" from the caller's perspective. Exported: the semantic
+// path (embeddings.ts) reuses it so both modes filter identically.
+export function applyDenylist(rows: CommandRow[], limit: number): CommandRow[] {
   const denied = new Set(loadConfig().denylist);
   const out: CommandRow[] = [];
   for (const r of rows) {
@@ -383,6 +399,16 @@ export function applyExitCodes(
   return applyMany([...outcomes.entries()]);
 }
 
+// Stable outcome-tier sort (proven success -> unknown -> failure).
+// Stable, so a pre-sorted relevance order (FTS rank, vector score) is kept
+// within each tier. Exported for the semantic path; the keyword path does
+// the same tiers in SQL.
+export function sortByOutcomeTier(rows: CommandRow[]): CommandRow[] {
+  const tier = (r: CommandRow): number =>
+    r.exitCode === 0 ? 0 : r.exitCode === null ? 1 : 2;
+  return [...rows].sort((a, b) => tier(a) - tier(b));
+}
+
 // Format rows for an LLM to read: newest first, with date, shell, provenance.
 // Phase 3 adds the outcome signal: [exit 0] worked, [exit N] failed, and no
 // marker means unknown (pre-hook history) — unknown is not failure.
@@ -398,4 +424,140 @@ export function formatRows(rows: CommandRow[]): string {
       return `${i + 1}. [${date}${approx}] [${r.shell}]${outcome} ${r.command}\n   source: ${r.sourceFile}`;
     })
     .join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: vector storage. Float32 little-endian BLOBs; unit-length vectors
+// (cosine similarity = dot product). All helpers take the model tag so a
+// future model/dtype swap is just "new tag -> old rows look missing".
+// ---------------------------------------------------------------------------
+
+function encodeVector(vec: Float32Array): Buffer {
+  return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
+}
+
+function decodeVector(blob: Buffer, dims: number): Float32Array {
+  return Float32Array.from(
+    new Float32Array(
+      blob.buffer,
+      blob.byteOffset,
+      Math.floor(blob.byteLength / 4)
+    ).subarray(0, dims)
+  );
+}
+
+// Drop vectors from any other model tag (upgrade path: re-embed follows).
+export function pruneStaleEmbeddings(model: string): number {
+  const res = getDb()
+    .query(`DELETE FROM command_embeddings WHERE model != ?`)
+    .run(model);
+  return Number(res.changes);
+}
+
+export function countEmbeddings(model: string): number {
+  return (
+    getDb()
+      .query(`SELECT COUNT(*) AS n FROM command_embeddings WHERE model = ?`)
+      .get(model) as { n: number }
+  ).n;
+}
+
+// History rows with no current-model vector yet (backfill source).
+// Keyset-paginated by id: pass back the max id seen to advance. (LIMIT
+// alone can't skip rows — e.g. denylisted noise the caller declines to
+// store would pin the cursor forever.)
+export function getCommandsMissingEmbeddings(
+  model: string,
+  limit: number,
+  afterId = 0
+): { id: number; command: string }[] {
+  return getDb()
+    .query(
+      `SELECT c.id, c.command FROM commands c
+       WHERE c.id > ? AND NOT EXISTS (
+         SELECT 1 FROM command_embeddings e
+         WHERE e.command_id = c.id AND e.model = ?
+       )
+       ORDER BY c.id
+       LIMIT ?`
+    )
+    .all(afterId, model, Math.max(Math.floor(limit), 1)) as {
+    id: number;
+    command: string;
+  }[];
+}
+
+export function storeEmbeddings(
+  ids: number[],
+  vectors: Float32Array[],
+  model: string,
+  dims: number
+): void {
+  if (ids.length === 0) return;
+  if (ids.length !== vectors.length) {
+    throw new Error(
+      `storeEmbeddings: ${ids.length} ids vs ${vectors.length} vectors`
+    );
+  }
+  const database = getDb();
+  const stmt = database.query(
+    `INSERT OR REPLACE INTO command_embeddings (command_id, embedding, model, dims)
+     VALUES (?, ?, ?, ?)`
+  );
+  const storeMany = database.transaction(() => {
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      const vec = vectors[i];
+      if (id === undefined || !vec || vec.length !== dims) {
+        throw new Error(
+          `storeEmbeddings: bad entry at index ${i} (want id + ${dims} dims)`
+        );
+      }
+      stmt.run(id, encodeVector(vec), model, dims);
+    }
+  });
+  storeMany();
+}
+
+// All stored vectors (+ optional proven-success pre-filter so top-k isn't
+// wasted on rows an onlySuccessful query would discard anyway).
+export function getEmbeddingCandidates(
+  model: string,
+  onlySuccessful: boolean
+): { id: number; embedding: Float32Array }[] {
+  const rows = (
+    onlySuccessful
+      ? getDb().query(
+          `SELECT e.command_id AS id, e.embedding, e.dims FROM command_embeddings e
+           JOIN commands c ON c.id = e.command_id
+           WHERE e.model = ? AND c.exit_code = 0`
+        )
+      : getDb().query(
+          `SELECT e.command_id AS id, e.embedding, e.dims FROM command_embeddings e
+           WHERE e.model = ?`
+        )
+  ).all(model) as { id: number; embedding: Buffer; dims: number }[];
+  return rows.map((r) => ({
+    id: r.id,
+    embedding: decodeVector(r.embedding, r.dims),
+  }));
+}
+
+// Fetch full rows for scored ids (order restored by the caller).
+export function getCommandsByIds(ids: number[]): CommandRow[] {
+  if (ids.length === 0) return [];
+  const out: CommandRow[] = [];
+  // IN-list chunked so very large id sets can't blow the variable limit.
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = getDb()
+      .query(
+        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code
+         FROM commands WHERE id IN (${placeholders})`
+      )
+      .all(...chunk) as DbRow[];
+    out.push(...rows.map(rowToEntry));
+  }
+  return out;
 }

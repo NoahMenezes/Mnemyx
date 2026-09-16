@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Local config. Phase 2 uses it for one thing: the noise denylist.
+// Local config. Phase 2: noise denylist. Phase 4: embeddings on/off.
 // (Phase 5 will grow this file with more keys — the path stays the same.)
 //
 // The file is OPTIONAL. If missing or unreadable we silently use the
@@ -12,7 +12,7 @@ import { join } from "node:path";
 // accidentally un-filter everything else.
 //
 // Example ~/.mnemyx/config.json:
-//   { "denylist": ["vim", "nano", "htop"] }
+//   { "denylist": ["vim", "nano", "htop"], "embeddings": false }
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_DENYLIST: string[] = [
@@ -38,6 +38,8 @@ export const DEFAULT_DENYLIST: string[] = [
 
 export interface MnemyxConfig {
   denylist: string[];
+  /** Phase 4: false disables semantic search entirely (pure FTS5). Default true. */
+  embeddings: boolean;
 }
 
 export function getConfigPath(): string {
@@ -51,10 +53,12 @@ export function loadConfig(
   configPath: string = getConfigPath()
 ): MnemyxConfig {
   const denied = new Set(DEFAULT_DENYLIST);
+  let embeddings = true;
   if (existsSync(configPath)) {
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
         denylist?: unknown;
+        embeddings?: unknown;
       };
       if (Array.isArray(raw.denylist)) {
         for (const item of raw.denylist) {
@@ -67,13 +71,20 @@ export function loadConfig(
           `[mnemyx] ignoring malformed "denylist" in ${configPath} (expected array of strings)`
         );
       }
+      if (typeof raw.embeddings === "boolean") {
+        embeddings = raw.embeddings;
+      } else if (raw.embeddings !== undefined) {
+        console.error(
+          `[mnemyx] ignoring malformed "embeddings" in ${configPath} (expected boolean)`
+        );
+      }
     } catch (err) {
       console.error(
         `[mnemyx] ignoring unreadable config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
-  return { denylist: [...denied] };
+  return { denylist: [...denied], embeddings };
 }
 
 // First whitespace-separated token, lowercased — the "command name".

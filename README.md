@@ -33,14 +33,16 @@ bunx tsc --noEmit
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false) | Full-text ranked keyword search; proven successes (exit 0) rank first, annotated `[exit N]` |
+| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`) | Natural-language semantic search (local embeddings) with keyword fallback; successes rank first, annotated `[exit N]` |
 | `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, for general context (noise filtered, outcomes annotated) |
 
 Example — "have I fixed this docker error before?":
 
 ```json
-{ "query": "docker permission denied", "limit": 10 }
+{ "query": "docker wont start", "limit": 10 }
 ```
+
+Semantic search matches *meaning*, not just words — that query surfaces a past `sudo systemctl enable --now docker` fix even though they share almost no tokens. When only keywords match, or semantic is unavailable, the same FTS5 keyword ranking from Phase 2 applies.
 
 Response (newest first, with timestamps, shell, and source file):
 
@@ -69,6 +71,16 @@ Each result is tagged with `source_file` **and** `shell` so you can see provenan
   ```
   Your entries are *added to* the built-ins, never replace them. Edits take effect immediately, no restart needed.
 - **Consecutive de-duplication**: identical back-to-back commands within one history file are collapsed to one row at import time (`ls` × 5 keeps a single entry).
+
+## Semantic search (Phase 4) — local embeddings, keyword fallback
+
+`search_history` defaults to `mode: "auto"`: meaning-based search when available, FTS5 keyword search otherwise. Pass `mode: "semantic"` to force it (falls back with a visible note if unavailable) or `mode: "keyword"` for the pure Phase 2/3 behavior. Denylist, `only_successful`, outcome tiers, and `[exit N]` annotations behave identically on both paths — only relevance scoring differs.
+
+- **Model**: `Xenova/all-MiniLM-L6-v2`, int8-quantized, 384 dims, ONNX CPU inference via `@huggingface/transformers`. Chosen because it's fully offline after a one-time download (cloud APIs rejected per local-first; an Ollama-style daemon rejected as an extra dependency; native-heavy toolchains rejected per the no-compilation principle).
+- **Storage (one-time)**: ~23 MB model weights in `~/.cache/mnemyx/models` (override with `HF_HOME`; deliberately outside `node_modules` so reinstalls never trigger a re-download), ~350 MB of npm packages (almost entirely the ONNX runtime's multi-platform binaries), ~3 MB of vectors for ~2000 commands inside the existing SQLite DB, ~100–200 MB RAM while embedding.
+- **Flow**: on startup the server serves immediately (keyword path) while missing commands embed in the background (~8 s per ~400 commands on a 12-core CPU; noise-denylisted commands are skipped). New history rows embed the same way on subsequent launches.
+- **Scale-up path**: one constant in `src/embeddings.ts` (`EMBEDDING_DTYPE: "q8"` → `"fp32"`, ~87 MB download, or a larger model id). Stored vectors are tagged with the exact model id, so old vectors are pruned and re-embedded automatically — no migration.
+- **Disable**: `{ "embeddings": false }` in `~/.mnemyx/config.json` → pure keyword search, model never loads. If the model can't load (offline first run, broken install), the tool degrades to keyword results instead of erroring — it never breaks entirely.
 
 ## Outcome signal (Phase 3) — optional shell hook
 
@@ -156,7 +168,16 @@ bunx @modelcontextprotocol/inspector bun run src/index.ts
 
 ## Configuration
 
-No env vars for Phase 1. The SQLite DB lives outside the repo so it works regardless of launch cwd:
+No env vars, no API keys — everything is local. `~/.mnemyx/config.json` is optional (missing file = built-in defaults):
+
+```json
+{ "denylist": ["vim", "nano", "htop"], "embeddings": true }
+```
+
+- `denylist`: extra noise commands, *added to* the built-ins. Takes effect immediately.
+- `embeddings`: `false` disables semantic search entirely (pure keyword, model never loads).
+
+The SQLite DB lives outside the repo so it works regardless of launch cwd:
 
 - Linux: `~/.local/share/mnemyx/mnemyx.db` (respects `XDG_DATA_HOME`)
 - macOS: `~/Library/Application Support/mnemyx/mnemyx.db`
@@ -167,8 +188,9 @@ Re-imports are idempotent (`INSERT OR IGNORE` on `(command, timestamp, source_fi
 
 ```text
 src/
-  config.ts           # denylist defaults + ~/.mnemyx/config.json loader
-  db.ts               # bun:sqlite schema, FTS5 index, ranked search, exit codes, formatting
+  config.ts           # denylist + embeddings flag, ~/.mnemyx/config.json loader
+  db.ts               # bun:sqlite schema, FTS5 index, vector store, ranked search, exit codes
+  embeddings.ts       # local ONNX embedder, backfill, cosine search
   exitLog.ts          # ~/.mnemyx/exit-codes.log path + tolerant JSONL parser
   historyParser.ts  # zsh + bash parsers + auto-detect merge
   index.ts          # MCP stdio server: startup import + 2 tools
@@ -176,6 +198,5 @@ src/
 
 ## Non-goals (later phases)
 
-- Phase 4: local embeddings for semantic search (FTS5 remains as fallback)
 - Phase 5: full config file, `mnemyx init` CLI, npm publish
 - Any networking, cloud sync, or telemetry
