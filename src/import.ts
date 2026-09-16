@@ -48,16 +48,30 @@ export function filterByMaxAge(
   return entries.filter((e) => e.timestamp >= cutoff);
 }
 
-export function runImport(): ImportResult {
-  initDb();
-  const cfg = loadConfig();
-  const parsed = parseAllAvailableHistory();
-  const entries = filterByMaxAge(parsed, cfg.maxHistoryAgeDays);
+export interface ImportOptions {
+  /** Override DB path (default: per-user production path). Tests use temp files. */
+  dbPath?: string;
+  /** Override config path (default: ~/.mnemyx/config.json). */
+  configPath?: string;
+  /** Override exit-code log path (default: ~/.mnemyx/exit-codes.log). */
+  exitLogPath?: string;
+  /** Pre-parsed entries, bypassing history-file parsing (tests). */
+  entries?: HistoryEntry[];
+  /** Injected clock for the age filter (tests). Unix seconds. */
+  nowSec?: number;
+}
+
+export function runImport(opts: ImportOptions = {}): ImportResult {
+  if (opts.dbPath !== undefined) initDb(opts.dbPath);
+  else initDb();
+  const cfg = loadConfig(opts.configPath);
+  const parsed = opts.entries ?? parseAllAvailableHistory();
+  const entries = filterByMaxAge(parsed, cfg.maxHistoryAgeDays, opts.nowSec);
   const added = bulkInsert(entries);
   let exitOutcomes = 0;
   let exitUpdated = 0;
   if (cfg.exitCodes) {
-    const outcomes = parseExitLog();
+    const outcomes = parseExitLog(opts.exitLogPath);
     exitOutcomes = outcomes.size;
     if (exitOutcomes > 0) {
       exitUpdated = applyExitCodes(outcomes);

@@ -146,6 +146,7 @@ Verify with `true; false; tail -n 2 ~/.mnemyx/exit-codes.log` (one `"exit": 0`, 
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
+bun test             # 38 tests, hermetic (temp DBs/configs, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 

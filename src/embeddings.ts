@@ -102,11 +102,18 @@ export async function embedTexts(texts: string[]): Promise<Float32Array[]> {
 // Embed every history row that lacks a current-model vector, in batches.
 // Noise-denylisted commands are skipped (no budget spent on `ls`).
 // Safe to run on every startup: already-embedded rows are untouched.
+// `overrides` exists for tests (stub embedder + fixed denylist = no model,
+// no ambient config); production callers omit it.
 export async function backfillMissingEmbeddings(
-  batchSize = 64
+  batchSize = 64,
+  overrides: {
+    embedFn?: (texts: string[]) => Promise<Float32Array[]>;
+    denied?: Set<string>;
+  } = {}
 ): Promise<{ embedded: number }> {
+  const embedFn = overrides.embedFn ?? embedTexts;
   pruneStaleEmbeddings(EMBEDDING_MODEL_ID);
-  const denied = new Set(loadConfig().denylist);
+  const denied = overrides.denied ?? new Set(loadConfig().denylist);
   const PAGE = batchSize * 3;
   let embedded = 0;
   // Keyset cursor over missing rows. The cursor may only advance past rows
@@ -138,7 +145,7 @@ export async function backfillMissingEmbeddings(
       if (page.length < PAGE) break; // tail page, all noise
       continue; // full page of noise, cursor advanced past it
     }
-    const vectors = await embedTexts(batch.map((m) => m.command));
+    const vectors = await embedFn(batch.map((m) => m.command));
     storeEmbeddings(
       batch.map((m) => m.id),
       vectors,
