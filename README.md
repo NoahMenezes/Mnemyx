@@ -209,7 +209,8 @@ Design notes: the DB keeps true text (so you can still *find* "the deploy using 
   "embeddings": true,
   "exitCodes": true,
   "maxHistoryAgeDays": 365,
-  "redactPatterns": ["mycompany-internal-\\d+"]
+  "redactPatterns": ["mycompany-internal-\\d+"],
+  "repoRoots": ["~/dev", "~/projects"]
 }
 ```
 
@@ -220,6 +221,7 @@ Design notes: the DB keeps true text (so you can still *find* "the deploy using 
 | `exitCodes` | `true` | `false` = ignore the exit-code log entirely (doesn't uninstall the shell snippet) |
 | `maxHistoryAgeDays` | `null` (unlimited) | Only index commands newer than N days; never deletes existing rows |
 | `redactPatterns` | `[]` | Extra secret regexes for output masking; invalid ones warn and skip |
+| `repoRoots` | `~/dev, ~/projects, ~/code, ~/Desktop` | Roots scanned for git repos (Phase 6). *Replaces* defaults; `~`/relative expand under `$HOME`; missing dirs skipped |
 
 `mnemyx status` prints the effective configuration plus DB/hook/model health without changing anything.
 
@@ -267,6 +269,7 @@ src/
   exitLog.ts        # exit-code log path + tolerant JSONL parser
   embeddings.ts     # local ONNX embedder, background backfill, cosine search
   config.ts         # ~/.mnemyx/config.json loader (all keys)
+  repoScanner.ts    # Phase 6: discover git repos under repoRoots (depth-capped, never throws)
   redact.ts         # secrets redaction for tool output (store raw, display masked)
   hook.ts           # shell-hook snippets + consent-gated installer
   *.test.ts         # hermetic suite: bun test (temp DBs, fixture strings, stub model)

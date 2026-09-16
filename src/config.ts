@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, isAbsolute, normalize } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Local config (~/.mnemyx/config.json). Phase 2: denylist. Phase 4:
 // embeddings on/off. Phase 5: exit-code reading on/off + max history age.
+// Phase 6: repoRoots for git discovery.
 //
 // The file is OPTIONAL. If missing or unreadable we silently use the
 // built-ins. A user `denylist` array EXTENDS the built-ins (union,
@@ -17,7 +18,8 @@ import { join } from "node:path";
 //     "embeddings": true,
 //     "exitCodes": true,
 //     "maxHistoryAgeDays": 365,
-//     "redactPatterns": ["mycompany-internal-\\d+"]
+//     "redactPatterns": ["mycompany-internal-\\d+"],
+//     "repoRoots": ["~/dev", "~/projects"]
 //   }
 // ---------------------------------------------------------------------------
 
@@ -64,10 +66,47 @@ export interface MnemyxConfig {
    * skipped. Defaults to [].
    */
   redactPatterns: string[];
+  /**
+   * Phase 6: root directories scanned for git repos. REPLACES the defaults
+   * (unlike denylist, which extends). `~` expands to $HOME; relative
+   * entries resolve under $HOME. Missing/unreadable dirs are skipped at
+   * scan time, never an error. Defaults to ~/dev, ~/projects, ~/code,
+   * ~/Desktop. Capped at MAX_REPO_ROOTS.
+   */
+  repoRoots: string[];
 }
 
 export function getConfigPath(): string {
   return join(requireHome(), ".mnemyx", "config.json");
+}
+
+// Phase 6: where to look for git repos when the user configured nothing.
+// Kept as bare names so tests can assert the contract without touching
+// ambient HOME; getDefaultRepoRoots() joins them under a home dir.
+export const DEFAULT_REPO_ROOT_NAMES: string[] = [
+  "dev",
+  "projects",
+  "code",
+  "Desktop",
+];
+
+/** Hard cap so a hostile/mistaken config can't queue hundreds of roots. */
+export const MAX_REPO_ROOTS = 20;
+
+export function getDefaultRepoRoots(home: string): string[] {
+  return DEFAULT_REPO_ROOT_NAMES.map((n) => join(home, n));
+}
+
+// Expand one user-supplied root: trim, `~` -> home, relative -> under home.
+// Returns null for blank input (caller drops it).
+export function expandRepoRoot(input: string, home: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed === "~" || trimmed.startsWith("~/")) {
+    return normalize(join(home, trimmed.slice(1)));
+  }
+  if (isAbsolute(trimmed)) return normalize(trimmed);
+  return normalize(join(home, trimmed));
 }
 
 // Central home-directory resolution. $HOME wins; otherwise the OS passwd
@@ -99,6 +138,7 @@ export function loadConfig(
   let exitCodes = true;
   let maxHistoryAgeDays: number | null = null;
   const redactPatterns: string[] = [];
+  let repoRoots: string[] | null = null;
   if (existsSync(configPath)) {
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
@@ -107,6 +147,7 @@ export function loadConfig(
         exitCodes?: unknown;
         maxHistoryAgeDays?: unknown;
         redactPatterns?: unknown;
+        repoRoots?: unknown;
       };
       if (Array.isArray(raw.denylist)) {
         for (const item of raw.denylist) {
@@ -156,13 +197,58 @@ export function loadConfig(
           `[mnemyx] ignoring malformed "redactPatterns" in ${configPath} (expected array of regex strings)`
         );
       }
+      if (Array.isArray(raw.repoRoots)) {
+        // REPLACES defaults (unlike denylist). Resolve `~`/relative
+        // against HOME now so every downstream caller sees absolute
+        // paths. Blank/non-string entries are dropped; over the cap
+        // the tail is ignored with a warning, never an error.
+        let homeForRoots = "";
+        try {
+          homeForRoots = requireHome();
+        } catch {
+          homeForRoots = "";
+        }
+        const seen = new Set<string>();
+        const resolved: string[] = [];
+        for (const item of raw.repoRoots) {
+          if (typeof item !== "string" || !item.trim()) continue;
+          const expanded =
+            homeForRoots !== ""
+              ? expandRepoRoot(item, homeForRoots)
+              : item.trim();
+          if (expanded === null || expanded === "") continue;
+          if (seen.has(expanded)) continue;
+          seen.add(expanded);
+          resolved.push(expanded);
+          if (resolved.length >= MAX_REPO_ROOTS) break;
+        }
+        if (resolved.length >= MAX_REPO_ROOTS && raw.repoRoots.length > resolved.length) {
+          console.error(
+            `[mnemyx] ignoring ${raw.repoRoots.length - resolved.length} repoRoots beyond the ${MAX_REPO_ROOTS} cap in ${configPath}`
+          );
+        }
+        repoRoots = resolved;
+      } else if (raw.repoRoots !== undefined && raw.repoRoots !== null) {
+        console.error(
+          `[mnemyx] ignoring malformed "repoRoots" in ${configPath} (expected array of path strings)`
+        );
+      }
     } catch (err) {
       console.error(
         `[mnemyx] ignoring unreadable config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
-  return { denylist: [...denied], embeddings, exitCodes, maxHistoryAgeDays, redactPatterns };
+  if (repoRoots === null) {
+    try {
+      repoRoots = getDefaultRepoRoots(requireHome());
+    } catch {
+      // No home (minimal containers): no sensible defaults exist.
+      // Callers treat [] as "nothing to scan", never a crash.
+      repoRoots = [];
+    }
+  }
+  return { denylist: [...denied], embeddings, exitCodes, maxHistoryAgeDays, redactPatterns, repoRoots };
 }
 
 // First whitespace-separated token, lowercased — the "command name".

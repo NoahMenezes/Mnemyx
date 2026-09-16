@@ -4,6 +4,10 @@ import {
   firstToken,
   requireHome,
   DEFAULT_DENYLIST,
+  DEFAULT_REPO_ROOT_NAMES,
+  MAX_REPO_ROOTS,
+  expandRepoRoot,
+  getDefaultRepoRoots,
 } from "./config.ts";
 
 test("missing config file yields full defaults", () => {
@@ -102,4 +106,68 @@ test("requireHome prefers HOME, falls back, then throws actionably", () => {
       throw new Error("no passwd entry");
     })
   ).toThrow(/set HOME/);
+});
+
+test("repoRoots default to dev/projects/code/Desktop under HOME", () => {
+  const cfg = loadConfig("/tmp/mnemyx-test-definitely-missing-12345.json");
+  expect(DEFAULT_REPO_ROOT_NAMES).toEqual(["dev", "projects", "code", "Desktop"]);
+  for (const name of DEFAULT_REPO_ROOT_NAMES) {
+    expect(cfg.repoRoots.some((r) => r.endsWith(`/${name}`))).toBe(true);
+  }
+  expect(getDefaultRepoRoots("/home/u")).toEqual([
+    "/home/u/dev",
+    "/home/u/projects",
+    "/home/u/code",
+    "/home/u/Desktop",
+  ]);
+});
+
+test("expandRepoRoot handles ~, absolute, relative, blanks", () => {
+  expect(expandRepoRoot("~/dev", "/home/u")).toBe("/home/u/dev");
+  expect(expandRepoRoot("~", "/home/u")).toBe("/home/u");
+  expect(expandRepoRoot("/x/y", "/home/u")).toBe("/x/y");
+  expect(expandRepoRoot("work", "/home/u")).toBe("/home/u/work");
+  expect(expandRepoRoot("   ", "/home/u")).toBeNull();
+});
+
+test("user repoRoots replace defaults, expand, dedupe, drop junk", async () => {
+  const p = `/tmp/mnemyx-cfg-${process.pid}-roots.json`;
+  await Bun.write(
+    p,
+    JSON.stringify({
+      repoRoots: ["~/dev", "/abs/path", "rel", "~/dev", "", 42, null],
+    })
+  );
+  try {
+    const cfg = loadConfig(p);
+    expect(cfg.repoRoots).toContain(`${process.env.HOME}/dev`);
+    expect(cfg.repoRoots).toContain("/abs/path");
+    expect(cfg.repoRoots).toContain(`${process.env.HOME}/rel`);
+    // Dedupe: ~/dev once.
+    expect(cfg.repoRoots.filter((r) => r.endsWith("/dev"))).toHaveLength(1);
+  } finally {
+    await Bun.$`rm -f ${p}`.quiet();
+  }
+});
+
+test("malformed repoRoots warn and fall back to defaults, never throw", async () => {
+  const p = `/tmp/mnemyx-cfg-${process.pid}-roots-bad.json`;
+  await Bun.write(p, JSON.stringify({ repoRoots: "nope" }));
+  try {
+    const cfg = loadConfig(p);
+    expect(cfg.repoRoots.length).toBeGreaterThan(0);
+  } finally {
+    await Bun.$`rm -f ${p}`.quiet();
+  }
+});
+
+test("repoRoots capped at MAX_REPO_ROOTS", async () => {
+  const p = `/tmp/mnemyx-cfg-${process.pid}-roots-cap.json`;
+  const many = Array.from({ length: MAX_REPO_ROOTS + 5 }, (_, i) => `/r${i}`);
+  await Bun.write(p, JSON.stringify({ repoRoots: many }));
+  try {
+    expect(loadConfig(p).repoRoots).toHaveLength(MAX_REPO_ROOTS);
+  } finally {
+    await Bun.$`rm -f ${p}`.quiet();
+  }
 });
