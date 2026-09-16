@@ -61,6 +61,47 @@ test("v1 lines read cwd/repo as null; v2 lines parse them", async () => {
   }
 });
 
+test("v3 lines parse stderr tails; blanks and junk read null", async () => {
+  const p = `/tmp/mnemyx-exit-v3-${process.pid}.log`;
+  await Bun.write(
+    p,
+    [
+      '{"ts": 104, "exit": 1, "cmd": "boom", "err": "Traceback (most recent call last):\\nValueError: bad"}',
+      '{"ts": 105, "exit": 0, "cmd": "fine", "err": ""}',
+      '{"ts": 106, "exit": 1, "cmd": "junk", "err": 42}',
+      '{"ts": 107, "exit": 1, "cmd": "v1style"}',
+    ].join("\n")
+  );
+  try {
+    const m = parseExitLog(p);
+    expect(m.get("boom")?.stderr).toContain("ValueError: bad");
+    expect(m.get("fine")?.stderr).toBeNull();
+    expect(m.get("junk")?.stderr).toBeNull();
+    expect(m.get("v1style")?.stderr).toBeNull();
+  } finally {
+    await Bun.$`rm -f ${p}`.quiet();
+  }
+});
+
+test("oversized stderr keeps the tail (exception last), capped", async () => {
+  const p = `/tmp/mnemyx-exit-v3cap-${process.pid}.log`;
+  const head = "noise\n".repeat(2000);
+  await Bun.write(
+    p,
+    JSON.stringify({ ts: 1, exit: 1, cmd: "big", err: `${head}FINAL: kaboom` })
+  );
+  try {
+    const err = parseExitLog(p).get("big")?.stderr ?? "";
+    expect(err.length).toBeLessThanOrEqual(2000);
+    expect(err).toContain("FINAL: kaboom");
+    // Tail kept (dropped ~10k of head), starts on a line boundary.
+    expect(err.startsWith("noise")).toBe(true);
+    expect(err.length).toBeLessThan(`${head}FINAL: kaboom`.length);
+  } finally {
+    await Bun.$`rm -f ${p}`.quiet();
+  }
+});
+
 test("oversized cwd values are capped, not stored whole", async () => {
   const p = `/tmp/mnemyx-exit-v2cap-${process.pid}.log`;
   await Bun.write(

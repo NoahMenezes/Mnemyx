@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { loadConfig, firstToken, requireHome } from "./config.ts";
 import { redactSecrets, REDACTED } from "./redact.ts";
+import { normalizeError } from "./errorFingerprint.ts";
 
 // Supported shells. Phase 1 scope: zsh + bash on macOS/Linux only.
 export type SupportedShell = "zsh" | "bash";
@@ -35,6 +36,15 @@ export interface CommandRow extends HistoryEntry {
    */
   cwd: string | null;
   repo: string | null;
+  /**
+   * Phase 8: redacted stderr tail of the latest observed FAILURE of this
+   * command (NULL when none captured). Redacted BEFORE storage — unlike
+   * command text, the raw bytes never reach the DB. Display-masked again
+   * on output (defense in depth).
+   */
+  stderrSnippet: string | null;
+  /** Phase 8: normalized fingerprint of stderrSnippet — the match column. */
+  stderrFp: string | null;
 }
 
 let db: Database | null = null;
@@ -131,6 +141,14 @@ export function initDb(dbPath: string = getDefaultDbPath()): Database {
   }
   if (!colNames.includes("repo")) {
     db.run(`ALTER TABLE commands ADD COLUMN repo TEXT;`);
+  }
+  // Phase 8: redacted stderr tail + its normalized fingerprint, for
+  // error search. NULL = none captured (older rows, successes).
+  if (!colNames.includes("stderr_snippet")) {
+    db.run(`ALTER TABLE commands ADD COLUMN stderr_snippet TEXT;`);
+  }
+  if (!colNames.includes("stderr_fp")) {
+    db.run(`ALTER TABLE commands ADD COLUMN stderr_fp TEXT;`);
   }
   // One-time NFC convergence for rows imported before storage normalization:
   // without it, re-imports would INSERT OR IGNORE-miss (NFC text differs
@@ -337,6 +355,8 @@ interface DbRow {
   exit_code: number | null;
   cwd: string | null;
   repo: string | null;
+  stderr_snippet: string | null;
+  stderr_fp: string | null;
 }
 
 function rowToEntry(row: DbRow): CommandRow {
@@ -350,6 +370,8 @@ function rowToEntry(row: DbRow): CommandRow {
     exitCode: row.exit_code,
     cwd: row.cwd ?? null,
     repo: row.repo ?? null,
+    stderrSnippet: row.stderr_snippet ?? null,
+    stderrFp: row.stderr_fp ?? null,
   };
 }
 
@@ -484,7 +506,7 @@ export function searchCommands(
   if (match === null) {
     rows = getDb()
       .query(
-        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
+        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo, stderr_snippet, stderr_fp
          FROM commands
          WHERE command LIKE '%' || ? || '%' ESCAPE '\\'
            ${successFilter ? "AND exit_code = 0" : ""}
@@ -495,7 +517,7 @@ export function searchCommands(
   } else {
     rows = getDb()
       .query(
-        `SELECT c.id, c.command, c.timestamp, c.source_file, c.shell, c.is_approximate_timestamp, c.exit_code, c.cwd, c.repo
+        `SELECT c.id, c.command, c.timestamp, c.source_file, c.shell, c.is_approximate_timestamp, c.exit_code, c.cwd, c.repo, c.stderr_snippet, c.stderr_fp
          FROM commands_fts f JOIN commands c ON c.id = f.rowid
          WHERE commands_fts MATCH ?
            ${successFilter ? "AND c.exit_code = 0" : ""}
@@ -515,7 +537,7 @@ export function getRecentCommands(limit?: number): CommandRow[] {
   const wanted = clampLimit(limit, 10);
   const rows = getDb()
     .query(
-      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
+      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo, stderr_snippet, stderr_fp
        FROM commands
        ORDER BY timestamp DESC
        LIMIT ?`
@@ -540,6 +562,8 @@ export interface ExitOutcome {
   exit: number;
   cwd?: string | null;
   repo?: string | null;
+  /** Raw stderr tail (v3 log lines). Redacted + fingerprinted before storage. */
+  stderr?: string | null;
 }
 
 export function applyExitCodes(
@@ -560,6 +584,20 @@ export function applyExitCodes(
   const updateCtxStmt = database.query(
     `UPDATE commands SET cwd = ?, repo = ?
      WHERE command = ? AND (IFNULL(cwd, '') != ? OR IFNULL(repo, '') != ?)`
+  );
+  // Phase 8: stderr goes through redact-before-store HERE — the single
+  // choke point for these columns. The raw snippet never reaches SQLite:
+  // what lands in stderr_snippet is already masked, and stderr_fp is the
+  // normalized fingerprint of the masked text. Only failures with actual
+  // output are stored (success chatter would only bloat the match column).
+  const extraPatterns = loadConfig().redactPatterns;
+  const pendingErrStmt = database.query(
+    `SELECT COUNT(*) AS n FROM commands
+     WHERE command = ? AND (IFNULL(stderr_fp, '') != ?)`
+  );
+  const updateErrStmt = database.query(
+    `UPDATE commands SET stderr_snippet = ?, stderr_fp = ?
+     WHERE command = ? AND (IFNULL(stderr_fp, '') != ?)`
   );
   const applyMany = database.transaction(
     (entries: [string, ExitOutcome][]): number => {
@@ -592,6 +630,21 @@ export function applyExitCodes(
               wantRepo
             );
             updated += pendingCtx;
+          }
+        }
+        // Phase 8: stderr stamping. Failures only, non-empty only — and the
+        // fingerprint gates the write, so identical reruns are no-ops.
+        if (outcome.exit !== 0 && typeof outcome.stderr === "string" && outcome.stderr.trim() !== "") {
+          const snippet = redactSecrets(outcome.stderr, extraPatterns).text;
+          const fp = normalizeError(outcome.stderr, extraPatterns);
+          if (fp !== "") {
+            const pendingErr = (
+              pendingErrStmt.get(command, fp) as { n: number }
+            ).n;
+            if (pendingErr > 0) {
+              updateErrStmt.run(snippet, fp, command, fp);
+              updated += pendingErr;
+            }
           }
         }
       }
@@ -811,7 +864,7 @@ export function getCommandsByIds(ids: number[]): CommandRow[] {
     const placeholders = chunk.map(() => "?").join(",");
     const rows = getDb()
       .query(
-        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
+        `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo, stderr_snippet, stderr_fp
          FROM commands WHERE id IN (${placeholders})`
       )
       .all(...chunk) as DbRow[];
@@ -977,7 +1030,7 @@ export function getCommandsInWindow(
   const wanted = clampLimit(limit, 20);
   const rows = getDb()
     .query(
-      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo
+      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo, stderr_snippet, stderr_fp
        FROM commands WHERE timestamp >= ? AND timestamp <= ?
        ORDER BY timestamp DESC LIMIT ?`
     )
@@ -987,6 +1040,71 @@ export function getCommandsInWindow(
       fetchSize(wanted)
     ) as DbRow[];
   return applyDenylist(rows.map(rowToEntry), wanted);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8: error search. Matches on the normalized fingerprint column —
+// the query is normalized with the SAME function as stored rows, so
+// volatile details (paths, pids, line numbers) can't break a real match.
+// Exact-fingerprint hits rank first, then substring, then recency.
+// No denylist here on purpose: a failing `ls` (permission denied) is
+// exactly the kind of past error worth resurfacing.
+// ---------------------------------------------------------------------------
+
+export function searchByError(query: string, limit?: number): CommandRow[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  if (trimmed.length > MAX_QUERY_LENGTH) {
+    throw new Error(
+      `query too long (${trimmed.length} chars, max ${MAX_QUERY_LENGTH})`
+    );
+  }
+  const fp = normalizeError(trimmed, loadConfig().redactPatterns);
+  if (fp === "") return [];
+  const wanted = clampLimit(limit, 20);
+  const like = `%${escapeLike(fp)}%`;
+  const rows = getDb()
+    .query(
+      `SELECT id, command, timestamp, source_file, shell, is_approximate_timestamp, exit_code, cwd, repo, stderr_snippet, stderr_fp
+       FROM commands
+       WHERE stderr_fp LIKE ? ESCAPE '\\'
+       ORDER BY CASE WHEN stderr_fp = ? THEN 0 ELSE 1 END, timestamp DESC
+       LIMIT ?`
+    )
+    .all(like, fp, Math.min(wanted * 2, 200)) as DbRow[];
+  return rows.slice(0, wanted).map(rowToEntry);
+}
+
+// Error matches rendered with the snippet that PROVES the match — the
+// LLM (and user) can confirm it's the same failure, not a coincidental
+// command-text overlap. Snippets are display-masked again even though
+// they were redacted at store time (defense in depth).
+export const MAX_SNIPPET_DISPLAY_CHARS = 800;
+
+export function formatErrorRows(rows: CommandRow[]): string {
+  if (rows.length === 0) {
+    return "No past errors match that message.";
+  }
+  const extraPatterns = loadConfig().redactPatterns;
+  return rows
+    .map((r, i) => {
+      const date = new Date(r.timestamp * 1000).toISOString();
+      const outcome = r.exitCode === null ? "" : ` [exit ${r.exitCode}]`;
+      let shown = sanitizeForDisplay(
+        redactSecrets(r.command, extraPatterns).text
+      );
+      if (shown.length > MAX_COMMAND_DISPLAY_LENGTH) {
+        shown = shown.slice(0, MAX_COMMAND_DISPLAY_LENGTH) + "… [truncated]";
+      }
+      let err = r.stderrSnippet === null
+        ? "(no captured output)"
+        : sanitizeForDisplay(redactSecrets(r.stderrSnippet, extraPatterns).text);
+      if (err.length > MAX_SNIPPET_DISPLAY_CHARS) {
+        err = err.slice(0, MAX_SNIPPET_DISPLAY_CHARS) + "… [truncated]";
+      }
+      return `${i + 1}. [${date}] [${r.shell}]${outcome} ${shown}\n   error: ${err}\n   source: ${r.sourceFile}`;
+    })
+    .join("\n");
 }
 
 // One-line per commit, for LLM consumption. Messages sanitized like

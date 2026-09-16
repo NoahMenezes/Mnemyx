@@ -10,6 +10,9 @@ import {
   searchCommits,
   formatCommits,
   countCommits,
+  searchByError,
+  formatErrorRows,
+  type CommandRow,
 } from "./db.ts";
 import { runImport } from "./import.ts";
 import { getExitLogPath } from "./exitLog.ts";
@@ -75,33 +78,64 @@ server.tool(
       limit: limit ?? 20,
       onlySuccessful: only_successful ?? false,
     };
+    const wanted = limit ?? 20;
+    let prefixNote = "";
+    let primary: CommandRow[];
     const useSemantic =
       (mode ?? "auto") !== "keyword" && loadConfig().embeddings;
     if (useSemantic) {
       try {
-        const rows = await semanticSearch(query, opts);
-        return {
-          content: [{ type: "text" as const, text: formatRows(rows) }],
-        };
+        primary = await semanticSearch(query, opts);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         console.error(`[mnemyx] semantic search unavailable (${reason}), keyword fallback`);
         if ((mode ?? "auto") === "semantic") {
-          const rows = searchCommands(query, opts);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `(semantic search unavailable: ${reason}; showing keyword results)\n\n${formatRows(rows)}`,
-              },
-            ],
-          };
+          prefixNote = `(semantic search unavailable: ${reason}; showing keyword results)\n\n`;
         }
-        // auto mode: silent fallback, keyword results below.
+        primary = searchCommands(query, opts);
+      }
+    } else {
+      primary = searchCommands(query, opts);
+    }
+    // Phase 8 backfill: when command-text matches are thin, past ERROR
+    // output often holds the answer (same traceback, different command).
+    // Skipped for onlySuccessful (errors are failures by construction)
+    // and capped at 5 so one section can't drown the primary results.
+    // Error search never breaks history search — it fails silent.
+    let extra = "";
+    if (!opts.onlySuccessful && primary.length < Math.ceil(wanted / 2)) {
+      try {
+        const seen = new Set(primary.map((r) => r.id));
+        const errRows = searchByError(query, 5).filter((r) => !seen.has(r.id));
+        if (errRows.length > 0) {
+          extra = `\n\nAlso matched past error output:\n${formatErrorRows(errRows)}`;
+        }
+      } catch {
+        // Best effort only.
       }
     }
-    const rows = searchCommands(query, opts);
-    return { content: [{ type: "text" as const, text: formatRows(rows) }] };
+    return {
+      content: [{ type: "text" as const, text: `${prefixNote}${formatRows(primary)}${extra}` }],
+    };
+  }
+);
+
+server.tool(
+  "search_by_error",
+  "Search your past FAILED commands by error message. Paste a traceback or error line — it is normalized (paths, pids, line numbers stripped) and matched against real past stderr, exact matches first. Each hit shows the command plus the error output proving the match.",
+  {
+    error_text: z.string().describe("The error message or traceback to match"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Max results to return (default 20, max 100)"),
+  },
+  async ({ error_text, limit }) => {
+    const rows = searchByError(error_text, limit ?? 20);
+    return { content: [{ type: "text" as const, text: formatErrorRows(rows) }] };
   }
 );
 

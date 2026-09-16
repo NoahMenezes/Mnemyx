@@ -150,7 +150,8 @@ Notes:
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`) | Natural-language semantic search over your history (local embeddings) with FTS5 keyword fallback. Proven exit-0 commands rank first; hits annotated `[exit N]` when the outcome is known |
+| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`) | Natural-language semantic search over your history (local embeddings) with FTS5 keyword fallback. Proven exit-0 commands rank first; hits annotated `[exit N]` when the outcome is known. When text matches are thin, past *error output* backfills (labeled section, failures only) |
+| `search_by_error` | `error_text: string`, `limit?: number` (default 20, max 100) | Paste a traceback/error — normalized (paths, pids, line numbers stripped) and matched against real past stderr, exact matches first. Each hit shows the command plus the proving error snippet |
 | `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, chronological (noise filtered, outcomes annotated) |
 | `search_commits` | `query: string`, `limit?: number` (default 20, max 100) | Keyword search over indexed git commit messages + file lists, across all repos. Hits carry short hash, date, files, and `repo:` path |
 | `get_commit_context` | `commit_hash: string` (full or ≥7-char prefix) | One commit: message, date, files, repo, plus on-demand `git show --stat` |
@@ -239,6 +240,23 @@ Shell history contains pasted credentials, and tool output goes straight to an A
 Design notes: the DB keeps true text (so you can still *find* "the deploy using that key"), masking happens in `formatRows()` — the single choke point all tools share. Ordinary commands pass through byte-identical (guarded by tests). Extend with your own JS regexes via `redactPatterns` in config; invalid patterns warn and skip, never break output.
 
 **Semantic search (local ONNX).** `Xenova/all-MiniLM-L6-v2` int8-quantized (384 dims) embeds commands to SQLite BLOBs; cosine similarity ranks them. The server serves immediately on the keyword path while missing rows embed in the background. Vectors are tagged with the exact model id, so switching models later prunes and re-embeds automatically. One constant (`EMBEDDING_DTYPE: "q8"` → `"fp32"`) scales quality up.
+
+## Error search (Phase 8)
+
+`search_by_error` matches on the *real error message* you're facing right now against real past stderr — stronger signal than command text when the traceback is all you have.
+
+**Honest limitation: capture is explicit, not automatic.** The interactive hook (`precmd`/`PROMPT_COMMAND`) runs *after* your command finishes, when stderr is already gone — there is no post-hoc API to recover it, and an always-on output tee would perturb fullscreen apps, colors, and pipes. So errors enter through `mnemyx run`, which executes with your terminal byte-identical and logs exit + stderr tail:
+
+```bash
+mnemyx run -- python3 train.py --lr 0.01   # exit code passes through; failures become searchable
+mnemyx init                                 # stamps exit + stderr into history rows
+```
+
+Then in your client: *"Use mnemyx search_by_error for '<paste traceback>'"* → past commands whose stderr normalizes the same, exact matches first, each with the proving snippet. `search_history` also backfills from error matches (labeled `Also matched past error output`) when text hits are thin.
+
+**Matching.** Both stored rows and your query go through `normalizeError` (`src/errorFingerprint.ts`, small commented regex list): Python keeps the exception line, Node the `Error:` head, Rust/Go the panic message; paths → `<PATH>`, addresses/UUIDs/timestamps/pids/`file:line` → placeholders. Unknown formats degrade to verbatim tail (reruns still match). Stored: redacted snippet (confirm by eye) + fingerprint (match on).
+
+**Privacy.** Command text follows store-raw/display-masked. Stderr is the deliberate exception: **redacted before storage** — `redactSecrets` runs inside the import transaction, so a key in error output never reaches the `.db` file (not even WAL). Proven by test: fake `AKIA…` + `password=` in, `grep` of raw DB bytes finds nothing. Success output is never stored (failures only), capped at 2000 chars.
 
 ## Git integration (Phase 6)
 
@@ -336,7 +354,7 @@ Data flows one way (files → SQLite → tools); secrets are masked at the singl
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 107 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
+bun test             # 128 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
@@ -358,6 +376,7 @@ src/
   exitLog.ts        # exit-code log path + tolerant JSONL parser
   embeddings.ts     # local ONNX embedder, background backfill, cosine search
   config.ts         # ~/.mnemyx/config.json loader (all keys, incl. repoRoots)
+  errorFingerprint.ts # Phase 8: stderr normalization rules + match fingerprints
   repoScanner.ts    # Phase 6: discover git repos under repoRoots (depth-capped, never throws)
   gitIndexer.ts     # Phase 6: one-spawn-per-repo git log index + on-demand diff stat + blame
                     # + graph / unified diff / status / file-history passthroughs (all masked)

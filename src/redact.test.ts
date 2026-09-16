@@ -13,6 +13,8 @@ function row(command: string): CommandRow {
     exitCode: null,
     cwd: null,
     repo: null,
+    stderrSnippet: null,
+    stderrFp: null,
   };
 }
 

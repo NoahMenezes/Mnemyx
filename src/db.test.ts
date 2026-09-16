@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -20,6 +20,8 @@ import {
   pruneStaleEmbeddings,
   dbPathFor,
   formatRows,
+  formatErrorRows,
+  searchByError,
   sanitizeForDisplay,
   MAX_COMMAND_DISPLAY_LENGTH,
   MAX_QUERY_LENGTH,
@@ -190,6 +192,85 @@ test("applyExitCodes stamps cwd/repo, v1 lines leave NULL, rerun no-ops", () => 
   ).toBe(1);
   const [moved] = searchCommands("deploy alpha", 5);
   expect(moved?.cwd).toBe("/other");
+});
+
+test("applyExitCodes stamps redacted stderr + fp on failures only", () => {
+  initDb(dbPath());
+  bulkInsert([entry("boom cmd", 1), entry("ok cmd", 2)]);
+  expect(
+    applyExitCodes(
+      new Map([
+        ["boom cmd", { exit: 1, stderr: "ValueError: bad at /home/u/a.py:10" }],
+        ["ok cmd", { exit: 0, stderr: "some chatter" }],
+      ])
+    )
+  ).toBe(3); // 2 exits + 1 stderr stamp (success chatter never stored)
+  const [boom] = searchCommands("boom cmd", 5);
+  expect(boom?.stderrFp).toContain("ValueError");
+  expect(boom?.stderrFp).not.toContain("/home/u/a.py");
+  expect(boom?.stderrSnippet).toContain("ValueError");
+  const [ok] = searchCommands("ok cmd", 5);
+  expect(ok?.stderrSnippet).toBeNull();
+  expect(ok?.stderrFp).toBeNull();
+  // Identical rerun: fingerprint gate makes it a no-op.
+  expect(
+    applyExitCodes(new Map([["boom cmd", { exit: 1, stderr: "ValueError: bad at /home/u/a.py:10" }]]))
+  ).toBe(0);
+});
+
+test("searchByError matches normalized, exact first, failures only", () => {
+  initDb(dbPath());
+  bulkInsert([
+    entry("run alpha", 1),
+    entry("run beta", 2),
+    entry("run gamma", 3),
+  ]);
+  applyExitCodes(
+    new Map([
+      ["run alpha", { exit: 1, stderr: 'Traceback (most recent call last):\n  File "/home/u/a.py", line 10\nValueError: bad' }],
+      ["run beta", { exit: 1, stderr: "ValueError: bad, also TypeError: x" }],
+      ["run gamma", { exit: 0 }],
+    ])
+  );
+  // Differently-worded query, same structure → both failures, exact first.
+  const got = searchByError('Traceback (most recent call last):\n  File "/tmp/z.py", line 99\nValueError: bad', 10);
+  expect(got.map((r) => r.command)).toEqual(["run alpha", "run beta"]);
+  // Success rows never match (nothing stored for them).
+  expect(searchByError("run gamma", 10)).toEqual([]);
+  expect(searchByError("   ", 10)).toEqual([]);
+  expect(() => searchByError("a".repeat(501), 5)).toThrow(/too long/);
+});
+
+test("formatErrorRows shows the proving snippet, masked", () => {
+  initDb(dbPath());
+  bulkInsert([entry("boom cmd", 1)]);
+  applyExitCodes(
+    new Map([["boom cmd", { exit: 1, stderr: "failed password=hunter2\nat /x:1" }]])
+  );
+  const [row] = searchByError("failed", 5);
+  const text = formatErrorRows(row ? [row] : []);
+  expect(text).toContain("boom cmd");
+  expect(text).toContain("[exit 1]");
+  expect(text).toContain("error:");
+  expect(text).not.toContain("hunter2");
+  expect(formatErrorRows([])).toContain("No past errors");
+});
+
+test("stderr secrets never reach raw DB bytes (privacy-critical)", () => {
+  const p = dbPath();
+  initDb(p);
+  bulkInsert([entry("leaky deploy", 1)]);
+  applyExitCodes(
+    new Map([
+      ["leaky deploy", { exit: 1, stderr: "failed with AKIAIOSFODNN7EXAMPLE and password=hunter2" }],
+    ])
+  );
+  closeDb();
+  const raw = readFileSync(p);
+  expect(raw.includes("EXAMPLE")).toBe(false);
+  expect(raw.includes("hunter2")).toBe(false);
+  // Masked form IS stored (proves redaction ran before the write).
+  expect(raw.includes("[redacted]")).toBe(true);
 });
 
 test("onlySuccessful filters to proven exit 0; tiers order success first", () => {
@@ -382,6 +463,8 @@ function commandRow(command: string): CommandRow {
     exitCode: null,
     cwd: null,
     repo: null,
+    stderrSnippet: null,
+    stderrFp: null,
   };
 }
 
