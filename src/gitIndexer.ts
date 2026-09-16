@@ -413,3 +413,161 @@ export function getCommitDiff(
   }
   return out.join("\n");
 }
+
+/** Cap for status lines: dirty trees can list thousands of files. */
+export const MAX_STATUS_LINES = 50;
+/** Cap for per-file commit entries. */
+export const MAX_FILE_HISTORY = 10;
+
+export interface FileHistoryEntry {
+  hash: string;
+  authorTs: number;
+  message: string;
+  added: number;
+  deleted: number;
+}
+
+// What's dirty RIGHT NOW: branch + ahead/behind, staged / unstaged /
+// untracked, relabeled from porcelain codes so an LLM reads them cold.
+// Single spawn, capped, masked. Null = not a repo / git failure.
+export function getRepoStatus(repoPath: string): string | null {
+  if (!isDir(repoPath)) return null;
+  let raw: string;
+  try {
+    const proc = Bun.spawnSync(
+      ["git", "status", "--porcelain=v1", "-b", "--"],
+      { cwd: repoPath, stdout: "pipe", stderr: "pipe" }
+    );
+    if (proc.exitCode !== 0) return null;
+    raw = String(proc.stdout);
+  } catch {
+    return null;
+  }
+  const lines = raw.split("\n").filter((l) => l !== "");
+  if (lines.length === 0) return `clean — no staged, unstaged, or untracked changes in ${repoPath}`;
+  const first = lines.shift() as string;
+  const branch = first.startsWith("## ") ? first.slice(3) : "(unknown branch)";
+  const staged: string[] = [];
+  const unstaged: string[] = [];
+  const untracked: string[] = [];
+  for (const line of lines) {
+    const x = line[0] ?? " ";
+    const y = line[1] ?? " ";
+    const path = line.slice(3);
+    if (x === "?" && y === "?") untracked.push(path);
+    else {
+      if (x !== " " && x !== "?") staged.push(`${x} ${path}`);
+      if (y !== " " && y !== "?") unstaged.push(`${y} ${path}`);
+    }
+  }
+  const out: string[] = [`branch: ${branch}`];
+  const push = (label: string, items: string[]): void => {
+    if (items.length === 0) return;
+    out.push(`${label} (${items.length}):`);
+    for (const item of items.slice(0, MAX_STATUS_LINES)) out.push(`  ${item}`);
+    if (items.length > MAX_STATUS_LINES) {
+      out.push(`  … [truncated, ${items.length - MAX_STATUS_LINES} more]`);
+    }
+  };
+  push("staged", staged);
+  push("unstaged", unstaged);
+  push("untracked", untracked);
+  return redactGitOutput(out.join("\n"));
+}
+
+// Per-file history: every commit touching relPath (`--follow` tracks
+// renames), newest first, with +added −deleted for THIS file from
+// --numstat. This is where per-file numbers live — stored nowhere.
+// Empty array = bad path / untracked / not a repo (never throws).
+export function getFileHistory(
+  repoPath: string,
+  relPath: string,
+  limit = 10
+): FileHistoryEntry[] {
+  const rel = resolveRepoRel(repoPath, relPath);
+  if (rel === null) return [];
+  const n = Number.isFinite(limit)
+    ? Math.min(50, Math.max(1, Math.floor(limit)))
+    : MAX_FILE_HISTORY;
+  let raw: string;
+  try {
+    const proc = Bun.spawnSync(
+      [
+        "git",
+        "log",
+        "--follow",
+        "--pretty=format:%H%x1f%at%x1f%s",
+        "--numstat",
+        "-n",
+        String(n),
+        "--",
+        rel,
+      ],
+      { cwd: normalize(resolve(repoPath)), stdout: "pipe", stderr: "pipe" }
+    );
+    if (proc.exitCode !== 0) return [];
+    raw = String(proc.stdout);
+  } catch {
+    return [];
+  }
+  const out: FileHistoryEntry[] = [];
+  // Records: `hash\x1f ts \x1f subject` line, then numstat lines
+  // (`added \t deleted \t path`), blank-separated.
+  let cur: { hash: string; authorTs: number; message: string } | null = null;
+  let added = 0;
+  let deleted = 0;
+  const flush = (): void => {
+    if (cur !== null) {
+      const done: FileHistoryEntry = {
+        hash: cur.hash,
+        authorTs: cur.authorTs,
+        message: cur.message,
+        added,
+        deleted,
+      };
+      out.push(done);
+      cur = null;
+    }
+    added = 0;
+    deleted = 0;
+  };
+  for (const line of raw.split("\n")) {
+    if (line === "") {
+      flush();
+      continue;
+    }
+    if (cur === null && /^[0-9a-f]{40}\x1f/.test(line)) {
+      const parts = line.split("\x1f");
+      const h = (parts[0] ?? "").trim();
+      const tsNum = Number.parseInt((parts[1] ?? "").trim(), 10);
+      if (!/^[0-9a-f]{40}$/.test(h) || !Number.isFinite(tsNum)) continue;
+      cur = { hash: h, authorTs: tsNum, message: parts.slice(2).join("\x1f").trim() };
+      continue;
+    }
+    const m = /^(\d+|-)\s+(\d+|-)\s+/.exec(line);
+    if (m !== null && cur !== null) {
+      // Binary files show `- - path`: counts unknown, keep 0/0.
+      if (m[1] !== "-") added += Number.parseInt(m[1] as string, 10);
+      if (m[2] !== "-") deleted += Number.parseInt(m[2] as string, 10);
+    }
+  }
+  flush();
+  return out;
+}
+
+// One file's history rendered for an LLM: short hash, date, +A −D,
+// message — the file-level answer to "what changed here".
+export function formatFileHistory(
+  repoPath: string,
+  relPath: string,
+  entries: FileHistoryEntry[]
+): string {
+  if (entries.length === 0) {
+    return `No history for ${relPath} in ${repoPath} (untracked, bad path, or not a repo).`;
+  }
+  const lines = entries.map((e) => {
+    const date = new Date(e.authorTs * 1000).toISOString().slice(0, 10);
+    return `- ${e.hash.slice(0, 7)} ${date} +${e.added} −${e.deleted} ${sanitizeForDisplay(e.message).slice(0, 200)}`;
+  });
+  return [`history of ${relPath} (${entries.length} commits, newest first):`, ...lines].join("\n");
+}

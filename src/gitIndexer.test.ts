@@ -9,6 +9,7 @@ import {
   indexAllRepos,
   getDiffStat,
   getCommitGraph,
+  getCommitDiff,
   blameLine,
 } from "./gitIndexer.ts";
 
@@ -165,7 +166,8 @@ test("getCommitGraph draws branches with hashes", () => {
   expect(getCommitGraph(plain, 10)).toBeNull();
 });
 
-test("getDiffStat masks secrets in git output", () => {  const repo = join(dir, "secretrepo");
+test("getDiffStat masks secrets in git output", () => {
+  const repo = join(dir, "secretrepo");
   mkdirSync(repo, { recursive: true });
   Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
   // Secret lives in the commit MESSAGE (filename-free case).
@@ -182,4 +184,91 @@ test("getDiffStat masks secrets in git output", () => {  const repo = join(dir, 
   expect(stat).not.toBeNull();
   expect(stat as string).not.toContain("hunter2");
   expect(stat as string).toContain("[redacted]");
+});
+
+function makeDiffRepo(name: string): { repo: string; hash: string } {
+  const repo = join(dir, name);
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "code.txt"), "one\ntwo\nthree\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "base"], { cwd: repo, env: gitEnv() });
+  writeFileSync(join(repo, "code.txt"), "one\nTWO\nthree\nfour\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "change two add four"], { cwd: repo, env: gitEnv() });
+  const hash = String(
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout
+  ).trim();
+  return { repo, hash };
+}
+
+test("getCommitDiff renders hunks with exact +/- lines and counts", () => {
+  const { repo, hash } = makeDiffRepo("diffrepo");
+  const diff = getCommitDiff(repo, hash);
+  expect(diff).not.toBeNull();
+  const d = diff as string;
+  expect(d).toContain("-two");
+  expect(d).toContain("+TWO");
+  expect(d).toContain("+four");
+  expect(d).toContain("@@");
+  expect(d).toContain("+2 −1");
+  expect(getCommitDiff(repo, "deadbee")).toBeNull();
+  expect(getCommitDiff(join(dir, "missing"), hash)).toBeNull();
+});
+
+test("getCommitDiff masks secrets and rejects escaping file filters", () => {
+  const repo = join(dir, "diffsecret");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "s.txt"), "a\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "base"], { cwd: repo, env: gitEnv() });
+  writeFileSync(join(repo, "s.txt"), "a\npassword=hunter2\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "oops"], { cwd: repo, env: gitEnv() });
+  const hash = String(
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout
+  ).trim();
+  const diff = getCommitDiff(repo, hash) as string;
+  expect(diff).not.toContain("hunter2");
+  expect(diff).toContain("[redacted]");
+  expect(getCommitDiff(repo, hash, { file: "../evil.txt" })).toBeNull();
+  expect(getCommitDiff(repo, hash, { file: "s.txt" })).toContain("+password=");
+});
+
+test("getCommitDiff truncates huge diffs with exact remainders", () => {
+  const repo = join(dir, "bigdiff");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "b.txt"), "x\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "base"], { cwd: repo, env: gitEnv() });
+  const big = Array.from({ length: 500 }, (_, i) => `line-${i}`).join("\n") + "\n";
+  writeFileSync(join(repo, "b.txt"), big);
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "big"], { cwd: repo, env: gitEnv() });
+  const hash = String(
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout
+  ).trim();
+  const diff = getCommitDiff(repo, hash, { maxLines: 50 }) as string;
+  expect(diff).toContain("… [truncated,");
+  expect(diff).toContain("+500");
+  expect(diff.split("\n").length).toBeLessThan(100);
+});
+
+test("getCommitDiff collapses binary files to one line", () => {
+  const repo = join(dir, "bindiff");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "a.bin"), Buffer.from([0, 1, 2, 3]));
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "base"], { cwd: repo, env: gitEnv() });
+  writeFileSync(join(repo, "a.bin"), Buffer.from([9, 8, 7, 6, 5]));
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "bin change"], { cwd: repo, env: gitEnv() });
+  const hash = String(
+    Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" }).stdout
+  ).trim();
+  const diff = getCommitDiff(repo, hash) as string;
+  expect(diff).toContain("Binary files");
 });
