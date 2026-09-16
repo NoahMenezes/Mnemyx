@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { loadConfig, firstToken } from "./config.ts";
+import { redactSecrets, REDACTED } from "./redact.ts";
 
 // Supported shells. Phase 1 scope: zsh + bash on macOS/Linux only.
 export type SupportedShell = "zsh" | "bash";
@@ -418,16 +419,21 @@ export function sortByOutcomeTier(rows: CommandRow[]): CommandRow[] {
 // date, shell, and provenance.
 // Phase 3 adds the outcome signal: [exit 0] worked, [exit N] failed, and no
 // marker means unknown (pre-hook history) — unknown is not failure.
+// Step 2 redacts secrets on output (store raw, display masked): masked hits
+// carry a [redacted] tag so the reader knows something was hidden.
 export function formatRows(rows: CommandRow[]): string {
   if (rows.length === 0) {
     return "No matching commands found in shell history.";
   }
+  const extraPatterns = loadConfig().redactPatterns;
   return rows
     .map((r, i) => {
       const date = new Date(r.timestamp * 1000).toISOString();
       const approx = r.timestampApproximate ? " (approx. time)" : "";
       const outcome = r.exitCode === null ? "" : ` [exit ${r.exitCode}]`;
-      return `${i + 1}. [${date}${approx}] [${r.shell}]${outcome} ${r.command}\n   source: ${r.sourceFile}`;
+      const redacted = redactSecrets(r.command, extraPatterns);
+      const marker = redacted.redacted ? ` ${REDACTED}` : "";
+      return `${i + 1}. [${date}${approx}] [${r.shell}]${outcome}${marker} ${redacted.text}\n   source: ${r.sourceFile}`;
     })
     .join("\n");
 }

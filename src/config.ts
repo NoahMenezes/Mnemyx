@@ -16,7 +16,8 @@ import { join } from "node:path";
 //     "denylist": ["vim", "nano", "htop"],
 //     "embeddings": true,
 //     "exitCodes": true,
-//     "maxHistoryAgeDays": 365
+//     "maxHistoryAgeDays": 365,
+//     "redactPatterns": ["mycompany-internal-\\d+"]
 //   }
 // ---------------------------------------------------------------------------
 
@@ -57,6 +58,12 @@ export interface MnemyxConfig {
    * DB rows are never deleted — it only filters newly parsed entries.
    */
   maxHistoryAgeDays: number | null;
+  /**
+   * Step 2: extra secret patterns (JS regex sources) ADDED to the built-in
+   * redaction rules, applied to tool output. Invalid patterns warn and are
+   * skipped. Defaults to [].
+   */
+  redactPatterns: string[];
 }
 
 export function getConfigPath(): string {
@@ -73,6 +80,7 @@ export function loadConfig(
   let embeddings = true;
   let exitCodes = true;
   let maxHistoryAgeDays: number | null = null;
+  const redactPatterns: string[] = [];
   if (existsSync(configPath)) {
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
@@ -80,6 +88,7 @@ export function loadConfig(
         embeddings?: unknown;
         exitCodes?: unknown;
         maxHistoryAgeDays?: unknown;
+        redactPatterns?: unknown;
       };
       if (Array.isArray(raw.denylist)) {
         for (const item of raw.denylist) {
@@ -120,13 +129,22 @@ export function loadConfig(
           `[mnemyx] ignoring malformed "maxHistoryAgeDays" in ${configPath} (expected non-negative number or null)`
         );
       }
+      if (Array.isArray(raw.redactPatterns)) {
+        for (const item of raw.redactPatterns) {
+          if (typeof item === "string" && item) redactPatterns.push(item);
+        }
+      } else if (raw.redactPatterns !== undefined) {
+        console.error(
+          `[mnemyx] ignoring malformed "redactPatterns" in ${configPath} (expected array of regex strings)`
+        );
+      }
     } catch (err) {
       console.error(
         `[mnemyx] ignoring unreadable config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
-  return { denylist: [...denied], embeddings, exitCodes, maxHistoryAgeDays };
+  return { denylist: [...denied], embeddings, exitCodes, maxHistoryAgeDays, redactPatterns };
 }
 
 // First whitespace-separated token, lowercased — the "command name".

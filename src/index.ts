@@ -159,7 +159,11 @@ async function main(): Promise<void> {
   console.error("[mnemyx] MCP server running on stdio");
 }
 
-main().catch((err) => {
-  console.error(`[mnemyx] fatal: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// Entry guard: importing this module must never launch the server
+// (tests and future tooling import it for its pieces).
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error(`[mnemyx] fatal: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

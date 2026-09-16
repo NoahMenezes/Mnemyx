@@ -4,9 +4,9 @@
 // shell-hook install (explicit consent only — never silent), and MCP client
 // registration. `mnemyx status` reports health without changing anything.
 // ---------------------------------------------------------------------------
-import { existsSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import { runImport } from "./import.ts";
@@ -14,59 +14,22 @@ import { getHistoryFilePaths } from "./historyParser.ts";
 import { getExitLogPath } from "./exitLog.ts";
 import { loadConfig, getConfigPath } from "./config.ts";
 import {
+  detectShell,
+  rcPath,
+  hookInstalled,
+  installHook,
+} from "./hook.ts";
+import {
   backfillMissingEmbeddings,
   EMBEDDING_MODEL_ID,
   getModelCacheDir,
 } from "./embeddings.ts";
-import { getDefaultDbPath, initDb, closeDb, countEmbeddings } from "./db.ts";
+import { getDefaultDbPath } from "./db.ts";
 import packageJson from "../package.json" with { type: "json" };
 
 const VERSION: string = packageJson.version;
 const SERVER_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const BUN_BIN = Bun.which("bun") ?? "bun";
-
-// --- Hook snippets (keep in sync with README) -------------------------------
-const HOOK_BEGIN = "# --- Mnemyx (optional)";
-const HOOK_END = "# --- end Mnemyx";
-const HOOK_HEADER = `${HOOK_BEGIN}: log each command's exit code locally for shell-history search.
-# Appends JSON lines to ~/.mnemyx/exit-codes.log. Nothing leaves your machine.
-# Remove this block to disable.`;
-const HOOK_PYTHON =
-  `MNEMYX_CODE="$code" MNEMYX_CMD="$cmd" python3 -c ` +
-  `'import json,os,time; print(json.dumps({"ts":int(time.time()),"exit":int(os.environ["MNEMYX_CODE"]),"cmd":os.environ["MNEMYX_CMD"]}))' ` +
-  `>> "$HOME/.mnemyx/exit-codes.log" 2>/dev/null`;
-
-function zshSnippet(): string {
-  return `${HOOK_HEADER}
-_mnemyx_precmd() {
-  local code=$?
-  local cmd
-  cmd=$(fc -ln -1 2>/dev/null | sed -e 's/^[[:space:]]*//')
-  if [ -n "$cmd" ]; then
-    ${HOOK_PYTHON}
-  fi
-  return "$code"
-}
-autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _mnemyx_precmd
-${HOOK_END}`;
-}
-
-function bashSnippet(): string {
-  return `${HOOK_HEADER}
-_mnemyx_prompt() {
-  local code=$?
-  local cmd
-  cmd=$(history 1 2>/dev/null | sed -e 's/^[[:space:]]*[0-9]*[[:space:]]*//')
-  if [ -n "$cmd" ]; then
-    ${HOOK_PYTHON}
-  fi
-  return "$code"
-}
-if [[ "\${PROMPT_COMMAND:-}" != *"_mnemyx_prompt"* ]]; then
-  PROMPT_COMMAND="_mnemyx_prompt\${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
-fi
-${HOOK_END}`;
-}
 
 // --- Small helpers -----------------------------------------------------------
 function home(): string {
@@ -135,20 +98,6 @@ function readStdinLine(): Promise<string | null> {
   return new Promise((resolve) => lineWaiters.push(resolve));
 }
 
-function detectShell(override?: string): "zsh" | "bash" {
-  if (override === "zsh" || override === "bash") return override;
-  const base = basename(process.env.SHELL || "");
-  return base === "bash" ? "bash" : "zsh"; // zsh default (macOS + common Linux)
-}
-
-function rcPath(shell: "zsh" | "bash"): string {
-  return join(home(), shell === "zsh" ? ".zshrc" : ".bashrc");
-}
-
-function hookInstalled(rc: string): boolean {
-  return existsSync(rc) && readFileSync(rc, "utf8").includes(HOOK_BEGIN);
-}
-
 // --- status (read-only) -------------------------------------------------------
 interface StatusInfo {
   dbPath: string;
@@ -170,19 +119,27 @@ function collectStatus(): StatusInfo {
   let vectors = 0;
   const dbExists = existsSync(dbPath);
   if (dbExists) {
-    initDb(dbPath);
+    // Single read-only handle, no migrations: status must never modify.
+    // (Migrations run on server/CLI import paths instead.)
+    const db = new Database(dbPath, { readonly: true });
     try {
-      const db = new Database(dbPath, { readonly: true });
       commands = (db.query(`SELECT COUNT(*) AS n FROM commands;`).get() as { n: number }).n;
+      const fts = db
+        .query(`SELECT 1 FROM sqlite_master WHERE name = 'commands_fts_docsize';`)
+        .get();
+      ftsDocs =
+        fts === undefined || fts === null
+          ? -1 // pre-Phase-2 DB without FTS
+          : (db.query(`SELECT COUNT(*) AS n FROM commands_fts_docsize;`).get() as { n: number }).n;
       try {
-        ftsDocs = (db.query(`SELECT COUNT(*) AS n FROM commands_fts_docsize;`).get() as { n: number }).n;
+        vectors = (
+          db.query(`SELECT COUNT(*) AS n FROM command_embeddings WHERE model = ?;`).get(EMBEDDING_MODEL_ID) as { n: number }
+        ).n;
       } catch {
-        ftsDocs = -1; // pre-Phase-2 DB without FTS
+        vectors = 0; // pre-Phase-4 DB without the vector table
       }
-      db.close();
-      vectors = countEmbeddings(EMBEDDING_MODEL_ID);
     } finally {
-      closeDb();
+      db.close();
     }
   }
   const cfg = loadConfig();
@@ -336,11 +293,7 @@ async function cmdInit(rawArgs: string[]): Promise<number> {
         console.log(`      It logs {"ts","exit","cmd"} lines to ~/.mnemyx/exit-codes.log — local only.`);
         const ok = flags.yes || (await ask(`      Install the ${shell} hook?`));
         if (ok) {
-          mkdirSync(join(home(), ".mnemyx"), { recursive: true });
-          const snippet = shell === "zsh" ? zshSnippet() : bashSnippet();
-          const prev = existsSync(rc) ? readFileSync(rc, "utf8") : "";
-          const sep = prev.length > 0 && !prev.endsWith("\n") ? "\n" : "";
-          appendFileSync(rc, `${sep}\n${snippet}\n`);
+          installHook(rc, shell);
           console.log(`      installed. Reload with: source ${rc}\n`);
         } else {
           console.log(`      skipped. Add it later from the README.\n`);
@@ -418,8 +371,11 @@ async function main(argv: string[]): Promise<number> {
   return 2;
 }
 
-const code = await main(Bun.argv.slice(2)).catch((err) => {
-  console.error(`[mnemyx] fatal: ${err instanceof Error ? err.message : String(err)}`);
-  return 1;
-});
-process.exit(code);
+// Entry guard: importing this module must never run the CLI.
+if (import.meta.main) {
+  const code = await main(Bun.argv.slice(2)).catch((err) => {
+    console.error(`[mnemyx] fatal: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  });
+  process.exit(code);
+}

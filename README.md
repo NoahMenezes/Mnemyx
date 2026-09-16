@@ -110,6 +110,17 @@ autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd _mnemyx_precmd
 
 Verify with `true; false; tail -n 2 ~/.mnemyx/exit-codes.log` (one `"exit": 0`, one `"exit": 1`).
 
+## Secrets redaction
+
+Shell history contains pasted credentials, and tool output goes straight to an AI client — so Mnemyx masks secrets on output. Built-in rules cover AWS keys, GitHub/Slack tokens, Bearer auth, basic-auth URLs, PEM private-key blocks, Discord webhooks, and `password=`/`export *_SECRET=`-style assignments (values only — `export AWS_SECRET=` stays readable). Masked hits carry a `[redacted]` tag:
+
+```text
+1. [2026-09-10T14:22:31.000Z] [zsh] [redacted] export AWS_SECRET_ACCESS_KEY=[redacted]
+   source: /home/you/.zsh_history
+```
+
+Design notes: the DB keeps true text (so you can still *find* "the deploy using that key"), masking happens in `formatRows()` — the single choke point all tools share. Ordinary commands pass through byte-identical (guarded by tests). Extend with your own JS regexes via `redactPatterns` in config; invalid patterns warn and skip, never break output.
+
 **Semantic search (local ONNX).** `Xenova/all-MiniLM-L6-v2` int8-quantized (384 dims) embeds commands to SQLite BLOBs; cosine similarity ranks them. The server serves immediately on the keyword path while missing rows embed in the background. Vectors are tagged with the exact model id, so switching models later prunes and re-embeds automatically. One constant (`EMBEDDING_DTYPE: "q8"` → `"fp32"`) scales quality up.
 
 ## Configuration
@@ -121,7 +132,8 @@ Verify with `true; false; tail -n 2 ~/.mnemyx/exit-codes.log` (one `"exit": 0`, 
   "denylist": ["vim", "nano", "htop"],
   "embeddings": true,
   "exitCodes": true,
-  "maxHistoryAgeDays": 365
+  "maxHistoryAgeDays": 365,
+  "redactPatterns": ["mycompany-internal-\\d+"]
 }
 ```
 
@@ -130,14 +142,15 @@ Verify with `true; false; tail -n 2 ~/.mnemyx/exit-codes.log` (one `"exit": 0`, 
 | `denylist` | 16 built-ins (`ls`, `cd`, `clear`, …) | Extra noise commands, *added to* the built-ins (first-word match, case-insensitive) |
 | `embeddings` | `true` | `false` = pure keyword search, model never loads |
 | `exitCodes` | `true` | `false` = ignore the exit-code log entirely (doesn't uninstall the shell snippet) |
-| `maxHistoryAgeDays` | `null` (unlimited) | Only index commands newer than N days. Filters newly parsed entries; never deletes existing rows |
+| `maxHistoryAgeDays` | `null` (unlimited) | Only index commands newer than N days; never deletes existing rows |
+| `redactPatterns` | `[]` | Extra secret regexes for output masking; invalid ones warn and skip |
 
 `mnemyx status` prints the effective configuration plus DB/hook/model health without changing anything.
 
 ## Privacy: what's stored where, what never happens
 
 - **Nothing leaves your machine. No telemetry, no cloud calls, no accounts, no API keys — ever.** The strongest guarantee is architectural: there is no networking code in this project.
-- Shell history stays yours: it's read from your home directory into a local SQLite DB and only ever served back to the MCP client running on the same machine.
+- Shell history stays yours: it's read from your home directory into a local SQLite DB and only ever served back to the MCP client running on the same machine. Pasted credentials are masked (`[redacted]`) before any tool output is produced — see Secrets redaction.
 - On-disk footprint (measured): `node_modules` ~550 MB (almost entirely the ONNX runtime's multi-platform binaries — install-time only), model weights ~23 MB in `~/.cache/mnemyx/models` (override with `HF_HOME`; deliberately outside `node_modules` so reinstalls never re-download), SQLite DB ~3 MB for ~2000 commands in `~/.local/share/mnemyx/mnemyx.db` (Linux; `~/Library/Application Support/mnemyx/` on macOS), config + exit log in `~/.mnemyx/`.
 - The model downloads once (~23 MB) on first semantic use, then works offline indefinitely. The exit-code log is append-only JSON lines; truncate it anytime (outcomes just return to unknown until commands re-run).
 
@@ -146,7 +159,7 @@ Verify with `true; false; tail -n 2 ~/.mnemyx/exit-codes.log` (one `"exit": 0`, 
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 38 tests, hermetic (temp DBs/configs, stubbed model) — must be green
+bun test             # 50 tests, hermetic (temp DBs/configs, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
@@ -167,7 +180,10 @@ src/
   historyParser.ts  # zsh extended + bash plain parsers, dedupe, auto-detect merge
   exitLog.ts        # exit-code log path + tolerant JSONL parser
   embeddings.ts     # local ONNX embedder, background backfill, cosine search
-  config.ts         # ~/.mnemyx/config.json loader (denylist, embeddings, exitCodes, max age)
+  config.ts         # ~/.mnemyx/config.json loader (all keys)
+  redact.ts         # secrets redaction for tool output (store raw, display masked)
+  hook.ts           # shell-hook snippets + consent-gated installer
+  *.test.ts         # hermetic suite: bun test (temp DBs, fixture strings, stub model)
 ```
 
 License: MIT — see [LICENSE](LICENSE).
