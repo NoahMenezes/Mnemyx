@@ -112,7 +112,12 @@ export interface IndexAllResult {
   commitsSeen: number;
   commitsAdded: number;
   errors: number;
+  /** Repo paths skipped (capped): with reasons in CLI verbose output. */
+  failures: { repo: string; reason: string }[];
 }
+
+/** How many failures to keep for display; the count is always exact. */
+const MAX_FAILURES_KEPT = 5;
 
 // Discover + index every repo. Failures count, never throw.
 export function indexAllRepos(configPath?: string): IndexAllResult {
@@ -123,25 +128,29 @@ export function indexAllRepos(configPath?: string): IndexAllResult {
     console.error(
       `[mnemyx] repo discovery failed: ${err instanceof Error ? err.message : String(err)}`
     );
-    return { repos: 0, commitsSeen: 0, commitsAdded: 0, errors: 1 };
+    return { repos: 0, commitsSeen: 0, commitsAdded: 0, errors: 1, failures: [] };
   }
   let commitsSeen = 0;
   let commitsAdded = 0;
   let errors = 0;
+  const failures: { repo: string; reason: string }[] = [];
+  const noteFailure = (repo: string, reason: string): void => {
+    errors++;
+    if (failures.length < MAX_FAILURES_KEPT) failures.push({ repo, reason });
+  };
   for (const repo of roots) {
     try {
       const r = indexRepo(repo);
       commitsSeen += r.total;
       commitsAdded += r.added;
-      if (r.skipped !== undefined) errors++;
+      if (r.skipped !== undefined) noteFailure(repo, r.skipped);
     } catch (err) {
-      errors++;
-      console.error(
-        `[mnemyx] skipping git repo ${repo}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      const reason = err instanceof Error ? err.message : String(err);
+      noteFailure(repo, reason);
+      console.error(`[mnemyx] skipping git repo ${repo}: ${reason}`);
     }
   }
-  return { repos: roots.length, commitsSeen, commitsAdded, errors };
+  return { repos: roots.length, commitsSeen, commitsAdded, errors, failures };
 }
 
 // On-demand `git show --stat` for one commit. Hash strictly validated
@@ -444,13 +453,16 @@ export function getRepoStatus(repoPath: string): string | null {
     return null;
   }
   const lines = raw.split("\n").filter((l) => l !== "");
-  if (lines.length === 0) return `clean — no staged, unstaged, or untracked changes in ${repoPath}`;
-  const first = lines.shift() as string;
+  // Porcelain -b always prints a `## branch` line, so a one-line output
+  // with no entries means clean (the zero-line case is bare/odd repos).
+  const first = lines[0] ?? "";
+  const rest = first.startsWith("## ") ? lines.slice(1) : lines;
   const branch = first.startsWith("## ") ? first.slice(3) : "(unknown branch)";
+  if (rest.length === 0) return `clean — no staged, unstaged, or untracked changes in ${repoPath}`;
   const staged: string[] = [];
   const unstaged: string[] = [];
   const untracked: string[] = [];
-  for (const line of lines) {
+  for (const line of rest) {
     const x = line[0] ?? " ";
     const y = line[1] ?? " ";
     const path = line.slice(3);

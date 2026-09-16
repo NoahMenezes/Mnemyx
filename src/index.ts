@@ -19,6 +19,9 @@ import {
   getDiffStat,
   getCommitGraph,
   getCommitDiff,
+  getRepoStatus,
+  getFileHistory,
+  formatFileHistory,
 } from "./gitIndexer.ts";
 import {
   getCommandsNearCommit,
@@ -256,6 +259,10 @@ server.tool(
   {},
   async () => {
     const r = indexAllRepos();
+    const skipped =
+      r.failures.length > 0
+        ? ` Skipped: ${r.failures.map((f) => `${f.repo} (${f.reason})`).join("; ")}${r.errors > r.failures.length ? ` +${r.errors - r.failures.length} more` : ""}.`
+        : "";
     return {
       content: [
         {
@@ -263,7 +270,7 @@ server.tool(
           text:
             r.repos === 0
               ? "No repos discovered under repoRoots — check ~/.mnemyx/config.json."
-              : `Indexed ${r.repos} repos: ${r.commitsAdded} new commits (${r.commitsSeen} seen)${r.errors > 0 ? `, ${r.errors} skipped` : ""}.`,
+              : `Indexed ${r.repos} repos: ${r.commitsAdded} new commits (${r.commitsSeen} seen)${r.errors > 0 ? `, ${r.errors} skipped` : ""}.${skipped}`,
         },
       ],
     };
@@ -366,6 +373,49 @@ server.tool(
         ? `Note: showing diff from ${repo} (index also knows ${h.slice(0, 7)} in ${known.repoPath}).\n\n`
         : "";
     return { content: [{ type: "text" as const, text: `${context}${diff}` }] };
+  }
+);
+
+server.tool(
+  "get_repo_status",
+  "What's dirty right now in one local repo: branch + ahead/behind, staged, unstaged, and untracked files. Cheap — call it before editing to know the starting state.",
+  {
+    repo_path: z.string().describe("Absolute path of the repo"),
+  },
+  async ({ repo_path }) => {
+    const status = getRepoStatus(repo_path);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: status ?? `No status for ${repo_path} (not a git repo or unreadable).`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
+  "get_file_history",
+  "Every commit that touched one file (follows renames), newest first, each with +added −removed counts for that file. The file-level answer to 'what changed here'.",
+  {
+    repo_path: z.string().describe("Absolute path of the repo"),
+    file_path: z.string().describe("File path relative to the repo root"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe("Max commits to show (default 10, max 50)"),
+  },
+  async ({ repo_path, file_path, limit }) => {
+    const entries = getFileHistory(repo_path, file_path, limit ?? 10);
+    return {
+      content: [
+        { type: "text" as const, text: formatFileHistory(repo_path, file_path, entries) },
+      ],
+    };
   }
 );
 

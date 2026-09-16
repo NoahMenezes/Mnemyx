@@ -154,8 +154,12 @@ Notes:
 | `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, chronological (noise filtered, outcomes annotated) |
 | `search_commits` | `query: string`, `limit?: number` (default 20, max 100) | Keyword search over indexed git commit messages + file lists, across all repos. Hits carry short hash, date, files, and `repo:` path |
 | `get_commit_context` | `commit_hash: string` (full or ≥7-char prefix) | One commit: message, date, files, repo, plus on-demand `git show --stat` |
-| `get_commit_story` | `commit_hash: string`, `window_minutes?: number` (default 30, max 180) | Commit context PLUS the shell commands from the window before it — timeline of what you did, then what you committed. Time-only match (see below) |
+| `get_commit_story` | `commit_hash: string`, `window_minutes?: number` (default 30, max 180), `with_diff?: boolean` (default false) | Commit context PLUS the shell commands from the window before it — timeline of what you did, then what you committed. Time-only match (see below) |
 | `explain_line` | `repo_path: string`, `file_path: string` (relative), `line_number: number` | Flagship: `git blame` finds who touched the line, then returns that commit's story. Answers "why does this line exist" |
+| `get_repo_log` | `repo_path: string`, `limit?: number` (default 15, max 30) | ASCII commit graph (`git log --graph`): hash, date, message per line, branches drawn |
+| `get_commit_diff` | `commit_hash: string`, `repo_path?: string`, `file?: string` (repo-relative), `max_lines?: number` (default 120, max 500) | Unified diff like a review view: per-file `+added −removed`, `@@` hunks, `+`/`-` lines. Secrets masked, binaries collapsed, truncated past caps. Works even for unindexed commits |
+| `get_repo_status` | `repo_path: string` | What's dirty now: branch + ahead/behind, staged / unstaged / untracked |
+| `get_file_history` | `repo_path: string`, `file_path: string` (relative), `limit?: number` (default 10, max 50) | Every commit touching one file (follows renames), newest first, each with `+added −removed` for that file |
 | `reindex_repos` | — | Re-scan `repoRoots` + index new commits (idempotent). Run after committing |
 
 Usage examples (as you'd prompt your assistant):
@@ -166,6 +170,27 @@ Usage examples (as you'd prompt your assistant):
 - *"Use mnemyx get_recent_commands to see what I was doing"* → recent context, noise (`ls`, `cd`) filtered out.
 - *"Use mnemyx search_commits for 'phase 5'"* → your `aad7b9a phase 5 done` commit with files + repo.
 - *"Use mnemyx explain_line for README.md line 1 in this repo"* → blamed commit + diff stat + what you ran before it.
+- *"Use mnemyx get_commit_diff for b77d1e0"* → the change itself, review-style.
+- *"Use mnemyx get_repo_status for this repo"* → what's dirty right now.
+
+**Reading diffs.** `get_commit_diff` renders close to a side-by-side review, in plain text your agent can quote:
+
+```text
+diff b77d1e0 (5 files, +447 −4)
+--- a/README.md b/README.md | +4 −1
+--- a/README.md
++++ b/README.md
+@@ -209,7 +209,8 @@ Design notes: ...
+   "embeddings": true,
+-  "redactPatterns": ["mycompany-internal-\\d+"]
++  "redactPatterns": ["mycompany-internal-\\d+"],
++  "repoRoots": ["~/dev", "~/projects"]
+ }
+…
+… [truncated, 40 more lines across 2 more files]
+```
+
+Per-file `+added −removed` headers, `@@ -old +new @@` hunks, context lines, `-`/`+` lines — the same information as the GitHub/VS Code views. Caps: 120 lines + 5 files by default (`max_lines` up to 500, `file` to narrow one file); binaries collapse to one line; secrets mask to `[redacted]` (the planted `password=hunter2` test proves it). `get_commit_story` appends the same preview as section 4 with `with_diff: true` (default false — diffs eat context).
 
 ## How it works
 
@@ -242,11 +267,13 @@ Mnemyx correlates shell history with local git history, so the AI answers "what 
             |  command_embs  |          |   files, ts) |
             +---+--------+---+          +--+---+-------+
                 |        |                    |   |
-  keyword (FTS5)|        |semantic (ONNX)      |   | blame (git CLI, on demand)
+  keyword (FTS5)|        |semantic (ONNX)      |   | blame / diff / status (git CLI, on demand)
                 |        |                    |   |
                 v        v                    v   v
             search_history  get_recent   search/get_/explain_/reindex
             get_recent_cmds              _commits/_story/_line/_repos
+                                         + repo_log / commit_diff (review view)
+                                         + repo_status / file_history (+A −D)
                                  |
                                  v
                      MCP stdio server (index.ts)
@@ -303,7 +330,7 @@ Data flows one way (files → SQLite → tools); secrets are masked at the singl
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 92 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
+bun test             # 107 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
@@ -327,6 +354,7 @@ src/
   config.ts         # ~/.mnemyx/config.json loader (all keys, incl. repoRoots)
   repoScanner.ts    # Phase 6: discover git repos under repoRoots (depth-capped, never throws)
   gitIndexer.ts     # Phase 6: one-spawn-per-repo git log index + on-demand diff stat + blame
+                    # + graph / unified diff / status / file-history passthroughs (all masked)
   correlate.ts      # Phase 6: time-window stories + line explanations (time-only caveat)
   redact.ts         # secrets redaction for tool output (store raw, display masked)
   hook.ts           # shell-hook snippets + consent-gated installer

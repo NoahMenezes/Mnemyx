@@ -10,6 +10,9 @@ import {
   getDiffStat,
   getCommitGraph,
   getCommitDiff,
+  getRepoStatus,
+  getFileHistory,
+  formatFileHistory,
   blameLine,
 } from "./gitIndexer.ts";
 
@@ -271,4 +274,45 @@ test("getCommitDiff collapses binary files to one line", () => {
   ).trim();
   const diff = getCommitDiff(repo, hash) as string;
   expect(diff).toContain("Binary files");
+});
+
+test("getRepoStatus labels staged/unstaged/untracked, clean when empty", () => {
+  const repo = join(dir, "statusrepo");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-qb", "main"], { cwd: repo });
+  writeFileSync(join(repo, "a.txt"), "x\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "base"], { cwd: repo, env: gitEnv() });
+  expect(getRepoStatus(repo)).toContain("clean");
+  writeFileSync(join(repo, "a.txt"), "dirty\n");
+  writeFileSync(join(repo, "new.txt"), "untracked\n");
+  const dirty = getRepoStatus(repo) as string;
+  expect(dirty).toContain("branch: main");
+  expect(dirty).toContain("unstaged (1):");
+  expect(dirty).toContain("a.txt");
+  expect(dirty).toContain("untracked (1):");
+  expect(dirty).toContain("new.txt");
+  expect(getRepoStatus(join(dir, "missing"))).toBeNull();
+});
+
+test("getFileHistory lists commits newest-first with +A -D", () => {
+  const repo = join(dir, "histrepo");
+  mkdirSync(repo, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "f.txt"), "one\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "add one"], { cwd: repo, env: gitEnv() });
+  writeFileSync(join(repo, "f.txt"), "one\ntwo\nthree\n");
+  Bun.spawnSync(["git", "add", "."], { cwd: repo, env: gitEnv() });
+  Bun.spawnSync(["git", "commit", "-qm", "add two lines"], { cwd: repo, env: gitEnv() });
+  const entries = getFileHistory(repo, "f.txt", 10);
+  expect(entries).toHaveLength(2);
+  expect(entries[0]?.message).toBe("add two lines");
+  expect(entries[0]?.added).toBe(2);
+  expect(entries[1]?.added).toBe(1);
+  expect(formatFileHistory(repo, "f.txt", entries)).toContain("+2 −0");
+  // Guards: traversal, missing file, bad repo.
+  expect(getFileHistory(repo, "../evil.txt")).toEqual([]);
+  expect(getFileHistory(repo, "missing.txt")).toEqual([]);
+  expect(getFileHistory(join(dir, "missing"), "f.txt")).toEqual([]);
 });

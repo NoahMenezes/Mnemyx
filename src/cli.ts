@@ -27,6 +27,7 @@ import {
   getModelCacheDir,
 } from "./embeddings.ts";
 import { getDefaultDbPath } from "./db.ts";
+import { discoverReposFromConfig } from "./repoScanner.ts";
 import packageJson from "../package.json" with { type: "json" };
 
 const VERSION: string = packageJson.version;
@@ -116,6 +117,7 @@ interface StatusInfo {
   ftsDocs: number;
   vectors: number;
   commits: number;
+  repos: number;
   modelId: string;
   configPath: string;
   hookRcFiles: string[];
@@ -129,6 +131,14 @@ function collectStatus(): StatusInfo {
   let ftsDocs = 0;
   let vectors = 0;
   let commits = 0;
+  // Repo discovery is a pure fs walk (no writes, no indexing) — cheap
+  // enough for status, and it explains a commits:0 honestly.
+  let repos = 0;
+  try {
+    repos = discoverReposFromConfig().length;
+  } catch {
+    repos = 0;
+  }
   const dbExists = existsSync(dbPath);
   if (dbExists) {
     // Single read-only handle, no migrations: status must never modify.
@@ -178,6 +188,7 @@ function collectStatus(): StatusInfo {
     ftsDocs,
     vectors,
     commits,
+    repos,
     modelId: EMBEDDING_MODEL_ID,
     configPath: getConfigPath(),
     hookRcFiles: rcs,
@@ -196,6 +207,7 @@ function printStatus(s: StatusInfo): void {
     console.log(`  FTS index:  ${fts}`);
     console.log(`  vectors:    ${s.vectors} (${s.modelId})`);
     console.log(`  commits:    ${s.commits} (git history, Phase 6)`);
+    console.log(`  repos:      ${s.repos} discovered under repoRoots`);
   }
   console.log(`Config:    ${s.configPath} ${existsSync(s.configPath) ? "" : "(using built-ins)"}`);
   console.log(`  denylist: ${cfg.denylist.length} entries, embeddings: ${cfg.embeddings}, exit codes: ${cfg.exitCodes}, max age: ${cfg.maxHistoryAgeDays === null ? "unlimited" : `${cfg.maxHistoryAgeDays} days`}`);
@@ -377,6 +389,9 @@ async function cmdInit(rawArgs: string[]): Promise<number> {
         console.log(
           `      commits: +${git.commitsAdded} new (${git.commitsSeen} seen across ${git.repos} repos${git.errors > 0 ? `, ${git.errors} skipped` : ""})`
         );
+        for (const f of git.failures) {
+          console.log(`        skipped ${f.repo}: ${f.reason}`);
+        }
       }
     } catch (err) {
       console.log(
