@@ -415,7 +415,19 @@ bun run src/cli.ts status   # health check against your real data
 
 ```text
 src/
-  index.ts          # MCP stdio server: import pipeline + 16 tools (history, git, errors, project, sessions, export)
+  index.ts          # MCP server entry: wires src/tools/* and serves stdio
+  tools/            # MCP tool definitions, one concern per file:
+    history.ts      #   search_history, search_by_error, recents, profile
+    git.ts          #   commits, stories, blame, diff, status, file history
+    activity.ts     #   sessions, export_notes
+  cli.ts            # CLI entry: usage + dispatch (bin target, keep path stable)
+  cli/              # CLI commands, one per file:
+    shared.ts       #   version, paths, home helper
+    input.ts        #   stdin prompts (ask/askText)
+    status.ts       #   read-only health report
+    init.ts         #   setup wizard (consent-gated hook install)
+    run.ts          #   transparent run wrapper (exit + stderr capture)
+    exportCmd.ts    #   shareable redacted markdown export
   cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
   db.ts             # barrel: re-exports src/db/* (public API unchanged)
