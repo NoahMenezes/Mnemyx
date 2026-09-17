@@ -195,7 +195,7 @@ Prefer browsing to prompting? `mnemyx dashboard` serves a read-only web UI on `h
 mnemyx dashboard [--port 4877] [--no-open]
 ```
 
-Tabs for search (keyword/auto, repo scope, exit-0 filter), sessions (click a row for commands + commits), commits, error search, and a status page — interactive data tables (sort, filter, pagination, expandable rows) over live data, dark terminal theme, secrets masked end to end (the JSON API reuses the same redact-then-display pipeline as the MCP tools, and the UI renders text nodes only). The tables run on a vendored Spectrum data-table component (React + Tailwind, dashboard-only dependencies — the MCP server itself stays dependency-free). Safety rules: binds loopback only (never `0.0.0.0`), GET-only (no mutations — reindex/export stay in CLI/MCP), `--no-open` for SSH/headless, Ctrl+C stops and nothing persists.
+Tabs for search (keyword/auto, repo scope, exit-0 filter), sessions (click a row for commands + commits), commits, error search, and a status page — real HTML tables, dark terminal theme, secrets masked end to end (the JSON API reuses the same redact-then-display pipeline as the MCP tools, and the page escapes everything it renders). Safety rules: binds loopback only (never `0.0.0.0`), GET-only (no mutations — reindex/export stay in CLI/MCP), `--no-open` for SSH/headless, Ctrl+C stops and nothing persists.
 
 **Reading tables.** History, commits, sessions, diffs, and status all render as bordered tables inside `text` fences — quote them verbatim instead of reformatting:
 
@@ -442,14 +442,7 @@ src/
   dashboard/        # Phase 10 local web UI (read-only, loopback-only):
     server.ts       #   Bun.serve wiring (127.0.0.1, GET-only routes)
     api.ts          #   masked JSON handlers (same queries as MCP tools)
-    ui/             #   React dashboard (bundled by Bun, dashboard-only deps):
-      index.html    #   entry (imports frontend + CSS)
-      frontend.tsx  #   React root mount
-      App.tsx       #   tabs shell + health line
-      tables.tsx    #   sessions/commands/commits tables + pills
-      lib/api.ts    #   typed fetch wrappers
-      lib/utils.ts  #   class-name helper
-      components/spectrumui/data-table.tsx  # vendored table primitive
+    page.html       #   single-file UI (tabs, tables, no dependencies)
   cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
   db.ts             # barrel: re-exports src/db/* (public API unchanged)

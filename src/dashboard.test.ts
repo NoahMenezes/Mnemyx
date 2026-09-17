@@ -140,13 +140,11 @@ test("commits and error search serve masked JSON", async () => {
   expect(missing.status).toBe(400);
 });
 
-test("unknown routes 404, non-GET 405, page serves the bundled app", async () => {
+test("unknown routes 404, non-GET 405, page serves HTML", async () => {
   expect((await api("/nope")).status).toBe(404);
   expect((await api("/api/search?q=x", "POST")).status).toBe(405);
   const page = await api("/");
   expect(page.status).toBe(200);
   expect(page.body).toContain("mnemyx dashboard");
-  // React root + Bun-bundled JS/CSS (the Spectrum table ships compiled).
-  expect(page.body).toContain('id="root"');
-  expect(page.body).toContain("/_bun/");
+  expect(page.body).toContain("<table");
 });
