@@ -9,6 +9,8 @@ import {
   getEmbeddingBatch,
   getCommandsByIds,
   sortByOutcomeTier,
+  partitionRepoFirst,
+  normalizeScopeRepo,
   applyDenylist,
   clampLimit,
   MAX_QUERY_LENGTH,
@@ -178,6 +180,13 @@ export async function backfillMissingEmbeddings(
 export interface SemanticOptions {
   limit?: number;
   onlySuccessful?: boolean;
+  /**
+   * Phase 7: repo scope ("this project first"). Boost-only by default
+   * (same-repo first, stable — cosine order preserved within each group);
+   * strict with onlyRepo (pre-filtered in SQL so top-K isn't wasted).
+   */
+  repo?: string | null;
+  onlyRepo?: boolean;
 }
 
 // Semantic search over stored vectors. Throws when unusable (model won't
@@ -208,6 +217,10 @@ export async function semanticSearch(
   // rows, gigabytes at a million). Identical results to scoring everything.
   const keep = Math.min(wanted * 3 + 10, 500);
   const onlySuccessful = opts.onlySuccessful === true;
+  // Phase 7: strict scoping pre-filters in SQL; boost-only stays JS-side.
+  const scopeRepo = normalizeScopeRepo(opts.repo ?? null);
+  const strictRepo = opts.onlyRepo === true && scopeRepo !== null ? scopeRepo : null;
+  const boostRepo = strictRepo === null ? scopeRepo : null;
   const topK = createTopK(keep);
   let afterId = 0;
   for (;;) {
@@ -215,7 +228,8 @@ export async function semanticSearch(
       EMBEDDING_MODEL_ID,
       onlySuccessful,
       afterId,
-      2000
+      2000,
+      strictRepo
     );
     if (batch.length === 0) break;
     afterId = batch[batch.length - 1]?.id ?? afterId;
@@ -231,7 +245,12 @@ export async function semanticSearch(
     const row = byId.get(s.id);
     if (row) ordered.push(row);
   }
-  return applyDenylist(sortByOutcomeTier(ordered), wanted);
+  // Phase 7: repo boost outermost, outcome tiers within each group, cosine
+  // order preserved within each tier (both sorts stable). Matches the
+  // keyword path's ORDER BY repo, outcome, relevance.
+  const tiered = sortByOutcomeTier(ordered);
+  const scoped = partitionRepoFirst(tiered, boostRepo);
+  return applyDenylist(scoped, wanted);
 }
 
 function dot(a: Float32Array, b: Float32Array): number {

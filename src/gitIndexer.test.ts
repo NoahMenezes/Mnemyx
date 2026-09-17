@@ -288,10 +288,11 @@ test("getRepoStatus labels staged/unstaged/untracked, clean when empty", () => {
   writeFileSync(join(repo, "new.txt"), "untracked\n");
   const dirty = getRepoStatus(repo) as string;
   expect(dirty).toContain("branch: main");
-  expect(dirty).toContain("unstaged (1):");
+  expect(dirty).toContain("unstaged");
   expect(dirty).toContain("a.txt");
-  expect(dirty).toContain("untracked (1):");
+  expect(dirty).toContain("untracked");
   expect(dirty).toContain("new.txt");
+  expect(dirty).toContain("| Status | File |");
   expect(getRepoStatus(join(dir, "missing"))).toBeNull();
 });
 
@@ -309,20 +310,24 @@ test("getFileHistory lists commits newest-first with +A -D", () => {  const repo
   expect(entries[0]?.message).toBe("add two lines");
   expect(entries[0]?.added).toBe(2);
   expect(entries[1]?.added).toBe(1);
-  expect(formatFileHistory(repo, "f.txt", entries)).toContain("+2 −0");
+  expect(formatFileHistory(repo, "f.txt", entries)).toContain("+2");
+  expect(formatFileHistory(repo, "f.txt", entries)).toContain("−0");
   // Guards: traversal, missing file, bad repo.
   expect(getFileHistory(repo, "../evil.txt")).toEqual([]);
   expect(getFileHistory(repo, "missing.txt")).toEqual([]);
   expect(getFileHistory(join(dir, "missing"), "f.txt")).toEqual([]);
 });
 
-test("diff design: fenced body, file table with trees and counts", () => {
+test("diff design: fenced body, file summary as a table", () => {
   const { repo, hash } = makeDiffRepo("designrepo");
   const diff = getCommitDiff(repo, hash) as string;
   const lines = diff.split("\n");
   // Summary + table outside the fence, body fenced exactly once.
   expect(lines[0]).toMatch(/^diff [0-9a-f]{7} \(1 file, \+2 −1\)$/);
-  expect(lines[1]).toMatch(/^└── code\.txt\s+\+2 −1$/);
+  expect(diff).toContain("| File | + | − |");
+  const tableRow = lines.find((l) => l.includes("code.txt"));
+  expect(tableRow).toContain("+2");
+  expect(tableRow).toContain("−1");
   const fenceIdx = lines.map((l, i) => (l === "```diff" ? i : -1)).filter((i) => i >= 0);
   const closeIdx = lines.map((l, i) => (l === "```" ? i : -1)).filter((i) => i >= 0);
   expect(fenceIdx).toHaveLength(1);
@@ -359,16 +364,17 @@ test("diff design: truncation and redaction notes stay outside the fence", () =>
   expect(truncAt).toBeGreaterThan(closeAt);
 });
 
-test("graph design: plain-fenced with redaction note outside", () => {
+test("graph design: header plus plain-fenced graph, redaction note outside", () => {
   const { repo } = makeBranchRepo("designgraph");
   const graph = getCommitGraph(repo, 10) as string;
   const lines = graph.split("\n");
-  expect(lines[0]).toBe("```");
+  expect(lines[0] as string).toMatch(/^### Log of /);
+  expect(lines[1]).toBe("```");
   expect(lines[lines.length - 1]).toBe("```");
   expect(graph).toContain("*");
 });
 
-test("file-history design: fenced aligned block", () => {
+test("file-history design: markdown table with counts", () => {
   const repo = join(dir, "designhist");
   mkdirSync(repo, { recursive: true });
   Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
@@ -380,8 +386,6 @@ test("file-history design: fenced aligned block", () => {
   Bun.spawnSync(["git", "commit", "-qm", "add two"], { cwd: repo, env: gitEnv() });
   const entries = getFileHistory(repo, "f.txt", 10);
   const text = formatFileHistory(repo, "f.txt", entries);
-  const lines = text.split("\n");
-  expect(lines[1]).toBe("```");
-  expect(lines[lines.length - 1]).toBe("```");
+  expect(text).toContain("| Commit | Date |");
   expect(text).toContain("+2");
 });

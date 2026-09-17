@@ -152,9 +152,10 @@ Notes:
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`) | Natural-language semantic search over your history (local embeddings) with FTS5 keyword fallback. Proven exit-0 commands rank first; hits annotated `[exit N]` when the outcome is known. When text matches are thin, past *error output* backfills (labeled section, failures only) |
-| `search_by_error` | `error_text: string`, `limit?: number` (default 20, max 100) | Paste a traceback/error — normalized (paths, pids, line numbers stripped) and matched against real past stderr, exact matches first. Each hit shows the command plus the proving error snippet |
-| `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, chronological (noise filtered, outcomes annotated) |
+| `search_history` | `query: string`, `limit?: number` (default 20, max 100), `only_successful?: boolean` (default false), `mode?: "auto" \| "semantic" \| "keyword"` (default `"auto"`), `repo_path?: string`, `only_repo?: boolean` (default false) | Natural-language semantic search over your history (local embeddings) with FTS5 keyword fallback. Proven exit-0 commands rank first; hits carry ✅/❌/— outcome badges. When text matches are thin, past *error output* backfills (labeled section, failures only). Pass `repo_path` (workspace root / git toplevel) to sort this project's commands first; `only_repo` restricts strictly |
+| `search_by_error` | `error_text: string`, `limit?: number` (default 20, max 100), `repo_path?: string`, `only_repo?: boolean` (default false) | Paste a traceback/error — normalized (paths, pids, line numbers stripped) and matched against real past stderr, exact matches first, then same-repo, then recency. Each hit shows the command plus the proving error snippet |
+| `get_recent_commands` | `limit?: number` (default 10, max 100), `repo_path?: string`, `only_repo?: boolean` (default false) | N most recent commands (noise filtered, outcomes annotated). With `repo_path`, this project's commands sort first, chronology kept within each group |
+| `get_project_profile` | `repo_path: string` | Lightweight usage profile for one project: command count + share of total, succeeded/unknown/failed split, activity window, top command names |
 | `search_commits` | `query: string`, `limit?: number` (default 20, max 100) | Keyword search over indexed git commit messages + file lists, across all repos. Hits carry short hash, date, files, and `repo:` path |
 | `get_commit_context` | `commit_hash: string` (full or ≥7-char prefix) | One commit: message, date, files, repo, plus on-demand `git show --stat` |
 | `get_commit_story` | `commit_hash: string`, `window_minutes?: number` (default 30, max 180), `with_diff?: boolean` (default false) | Commit context PLUS the shell commands from the window before it — timeline of what you did, then what you committed. Same-repo commands (v2 hook) sort first; the rest are time-only. `with_diff: true` appends the diff preview |
@@ -164,6 +165,10 @@ Notes:
 | `get_repo_status` | `repo_path: string` | What's dirty now: branch + ahead/behind, staged / unstaged / untracked |
 | `get_file_history` | `repo_path: string`, `file_path: string` (relative), `limit?: number` (default 10, max 50) | Every commit touching one file (follows renames), newest first, each with `+added −removed` for that file |
 | `reindex_repos` | — | Re-scan `repoRoots` + index new commits (idempotent). Run after committing |
+| `list_sessions` | `limit?: number` (default 10, max 30), `repo_path?: string`, `only_repo?: boolean`, `gap_minutes?: number` (default 30, max 180), `since_days?: number` (max 90) | Bursts of related commands + the commits they led to, one table row per session, newest first. Splits on quiet gaps or repo switches |
+| `get_session` | `session_id: string`, `gap_minutes?: number` | Full detail for one session: timing, outcomes, commands in story order, commits |
+
+All list-style outputs render as markdown tables (pipes escaped, long cells capped), graphs and diffs as fenced blocks — every terminal agent renders them natively.
 
 Usage examples (as you'd prompt your assistant):
 
@@ -175,16 +180,32 @@ Usage examples (as you'd prompt your assistant):
 - *"Use mnemyx explain_line for README.md line 1 in this repo"* → blamed commit + diff stat + what you ran before it.
 - *"Use mnemyx get_commit_diff for b77d1e0"* → the change itself, review-style.
 - *"Use mnemyx get_repo_status for this repo"* → what's dirty right now.
+- *"Use mnemyx list_sessions for this repo"* → recent work bursts as a table (when, how long, outcomes, commits, top commands).
+- *"Use mnemyx get_session for s1726069200-myproj"* → that burst in full: commands in story order + the commits they led to.
+
+**Reading tables.** History, commits, sessions, diffs, and status all render as markdown tables your agent can quote:
+
+```text
+| # | Date | Shell | Exit | Command |
+| --- | --- | --- | --- | --- |
+| 1 | 09-16 14:22 | zsh | ✅ 0 | sudo systemctl enable --now docker |
+| 2 | 09-16 14:20 | bash | ❌ 1 | python3 train.py --lr 0.01 |
+
+| Session | When | Dur | Repo | Cmds | ok/fail/? | Commits | Top |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| s1726069200-mnemyx | 09-16 14:02→14:41 | 39m | mnemyx | 18 | 14/2/2 | a1b2c3d | git, docker, bun |
+```
+
+Multiline commands collapse newlines to `↵` so rows never break; `|` inside commands is escaped; secrets mask to `[redacted]` inside cells.
 
 **Reading diffs.** `get_commit_diff` renders close to a side-by-side review, in plain text your agent can quote:
 
 ```text
 diff b77d1e0 (5 files, +447 −4)
-├── README.md               +4  −1
-├── src/config.test.ts      +68 −0
-├── src/config.ts           +89 −3
-├── src/repoScanner.test.ts +109 −0
-└── src/repoScanner.ts      +177 −0
+| File | + | − |
+| --- | ---: | ---: |
+| README.md | +4 | −1 |
+| src/config.ts | +89 | −3 |
 ```diff
 --- a/README.md b/README.md | +4 −1
 --- a/README.md
@@ -368,7 +389,7 @@ history tools unaffected, no stderr → error tools report empty, never crash.
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 129 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
+bun test             # 151 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
@@ -382,10 +403,22 @@ bun run src/cli.ts status   # health check against your real data
 
 ```text
 src/
-  index.ts          # MCP stdio server: import pipeline + 12 tools (history, git, errors)
+  index.ts          # MCP stdio server: import pipeline + 15 tools (history, git, errors, project, sessions)
   cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
-  db.ts             # bun:sqlite schema + migrations, FTS5 index, vector store, ranked search, commits
+  db.ts             # barrel: re-exports src/db/* (public API unchanged)
+  db/               # SQLite layer, one concern per file:
+    types.ts        #   row interfaces + canonical SELECT column lists
+    connection.ts   #   handle lifecycle, busy-retry, limits
+    paths.ts        #   per-user DB path resolution
+    schema.ts       #   tables, migrations, FTS5 index, vector/commit stores
+    scope.ts        #   query primitives (LIKE/FTS/rank/repo scope)
+    commands.ts     #   history writes, keyword search, recents, exit stamping
+    vectors.ts      #   Phase 4 embedding BLOB store
+    commits.ts      #   Phase 6 commit store + queries
+    errors.ts       #   Phase 8 error-fingerprint search + rendering
+    profile.ts      #   Phase 7 per-project usage profile
+    format.ts       #   LLM-facing rendering (redact + sanitize choke point)
   historyParser.ts  # zsh extended + bash plain parsers, dedupe, auto-detect merge
   exitLog.ts        # exit-code log path + tolerant JSONL parser
   embeddings.ts     # local ONNX embedder, background backfill, cosine search
@@ -395,6 +428,7 @@ src/
   gitIndexer.ts     # Phase 6: one-spawn-per-repo git log index + on-demand diff stat + blame
                     # + graph / unified diff / status / file-history passthroughs (all masked)
   correlate.ts      # Phase 6: time-window stories (same-repo first) + line explanations
+  sessions.ts       # Phase 9: on-demand burst clustering (list/get) + table rendering
   redact.ts         # secrets redaction for tool output (store raw, display masked)
   hook.ts           # shell-hook snippets (v2: exit+cwd+repo) + consent-gated installer/upgrader
   *.test.ts         # hermetic suite: bun test (temp DBs, fixture strings, stub model)

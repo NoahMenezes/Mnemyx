@@ -16,6 +16,7 @@ import {
   getCommandsInWindow,
   getCommitsByHash,
   formatRows,
+  mdTable,
   sanitizeForDisplay,
   type CommandRow,
   type GitCommit,
@@ -71,7 +72,8 @@ export function resolveCommit(hashPrefix: string): GitCommit | null {
 // Format one commit + its story for an LLM: labelled sections so
 // the reader can tell stored fact (message/files) apart from heuristic
 // (time-window commands) apart from on-demand git output (diff stat,
-// optional full diff preview).
+// optional full diff preview). Header and files render as tables; the
+// diff stat stays fenced (preformatted git output).
 export function formatCommitStory(
   commit: GitCommit,
   commands: CommandRow[],
@@ -79,43 +81,43 @@ export function formatCommitStory(
   diffPreview: string | null = null
 ): string {
   const date = new Date(commit.authorTs * 1000).toISOString();
-  const files =
-    commit.filesChanged.length > 0
-      ? commit.filesChanged
-          .slice(0, 5)
-      .map((f, i, arr) =>
-        i === arr.length - 1
-          ? `  └── ${sanitizeForDisplay(f)}`
-          : `  ├── ${sanitizeForDisplay(f)}`
-      )
-          .concat(
-            commit.filesChanged.length > 5
-              ? [`  … and ${commit.filesChanged.length - 5} more`]
-              : []
-          )
-          .join("\n")
-      : "  (file list unavailable)";
   const head = [
     `## What changed — commit ${commit.hash.slice(0, 7)} (${commit.hash})`,
-    `repo: ${commit.repoPath}`,
-    `date: ${date}`,
-    `message: ${sanitizeForDisplay(commit.message)}`,
-    `files:\n${files}`,
+    mdTable(["Field", "Value"], [
+      ["repo", commit.repoPath],
+      ["date", date],
+      ["message", sanitizeForDisplay(commit.message)],
+    ]),
   ].join("\n");
-  const stat = diffStat !== null ? `\n\n## Diff stat\n${sanitizeForDisplay(diffStat)}` : "";
+  const files =
+    commit.filesChanged.length > 0
+      ? `### Files (${commit.filesChanged.length})\n` +
+        mdTable(
+          [`Files (${commit.filesChanged.length})`],
+          commit.filesChanged
+            .slice(0, 20)
+            .map((f) => [sanitizeForDisplay(f)])
+            .concat(
+              commit.filesChanged.length > 20
+                ? [[`… and ${commit.filesChanged.length - 20} more`]]
+                : []
+            )
+        )
+      : "(file list unavailable)";
+  const stat = diffStat !== null && diffStat.trim() !== "" ? `\n\n## Diff stat\n\`\`\`\n${diffStat}\n\`\`\`` : "";
   const preview =
     diffPreview !== null && diffPreview.trim() !== ""
       ? `\n\n## Diff\n${diffPreview}`
       : "";
   if (commands.length === 0) {
-    return `${head}${stat}${preview}\n\n## What I ran around then\nno indexed commands in that window.`;
+    return `${head}\n${files}${stat}${preview}\n\n## What I ran around then\nno indexed commands in that window.`;
   }
   const repoMatched = commands.some((c) => c.repo !== null && c.repo === commit.repoPath);
   const caveat = repoMatched
     ? "top entries ran in this repo (hook-tracked), rest are time-only"
     : "time-only match (no repo-tracked commands yet — upgrade the shell hook)";
   return (
-    `${head}${stat}${preview}` +
+    `${head}\n${files}${stat}${preview}` +
     `\n\n## What I ran around then (${caveat})\n${formatRows(commands)}`
   );
 }

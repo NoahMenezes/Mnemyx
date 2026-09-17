@@ -74,7 +74,7 @@ test("formatCommitStory labels sections and handles empty window", () => {
   // No repo-tracked rows yet → honest time-only caveat.
   expect(full).toContain("time-only match");
   expect(full).toContain("## What changed");
-  expect(full).toContain("└── a.ts");
+  expect(full).toContain("| a.ts |");
 });
 
 test("same-repo commands sort first and lift the caveat", () => {

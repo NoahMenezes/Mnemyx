@@ -12,8 +12,13 @@ import {
   getRecentCommands,
   applyExitCodes,
   sortByOutcomeTier,
-  storeEmbeddings,
+  normalizeScopeRepo,
+  partitionRepoFirst,
+  getProjectProfile,
+  formatProjectProfile,
+  getEmbeddingBatch,
   getEmbeddingCandidates,
+  storeEmbeddings,
   getCommandsMissingEmbeddings,
   getCommandsByIds,
   countEmbeddings,
@@ -23,6 +28,10 @@ import {
   formatErrorRows,
   searchByError,
   sanitizeForDisplay,
+  mdTable,
+  mdCell,
+  exitBadge,
+  shortDateTime,
   MAX_COMMAND_DISPLAY_LENGTH,
   MAX_QUERY_LENGTH,
   type HistoryEntry,
@@ -250,7 +259,7 @@ test("formatErrorRows shows the proving snippet, masked", () => {
   const [row] = searchByError("failed", 5);
   const text = formatErrorRows(row ? [row] : []);
   expect(text).toContain("boom cmd");
-  expect(text).toContain("[exit 1]");
+  expect(text).toContain("❌ 1");
   expect(text).toContain("error:");
   expect(text).not.toContain("hunter2");
   expect(formatErrorRows([])).toContain("No past errors");
@@ -484,15 +493,204 @@ test("sanitizeForDisplay strips ANSI/control chars, keeps newlines/tabs", () => 
 test("formatRows truncates pathological commands with a marker", () => {
   const big = "x".repeat(MAX_COMMAND_DISPLAY_LENGTH + 100);
   const text = formatRows([commandRow(`echo ${big}`)]);
-  expect(text).toContain("[truncated]");
-  expect(text.length).toBeLessThan(MAX_COMMAND_DISPLAY_LENGTH + 200);
-  expect(formatRows([commandRow("short")])).not.toContain("[truncated]");
+  // Table cell capped at TABLE_COMMAND_WIDTH with an ellipsis marker.
+  expect(text).toContain("…");
+  expect(text.length).toBeLessThan(600);
+  expect(formatRows([commandRow("short")])).not.toContain("…");
+  // One table row per command: header + separator + 1 row.
+  expect(text.split("\n").filter((l) => l.startsWith("|"))).toHaveLength(3);
 });
 
-test("overlong queries throw instead of burning CPU", () => {
-  initDb(dbPath());
+test("overlong queries throw instead of burning CPU", () => {  initDb(dbPath());
   bulkInsert([entry("deploy alpha", 1)]);
   const long = "a".repeat(MAX_QUERY_LENGTH + 1);
   expect(() => searchCommands(long, 5)).toThrow(/too long/);
   expect(() => searchCommands("a".repeat(MAX_QUERY_LENGTH), 5)).not.toThrow();
+});
+
+// ---------------------------------------------------------------------------
+// Phase 7: project scoping ("this project first").
+// ---------------------------------------------------------------------------
+
+test("normalizeScopeRepo: blank -> null, trailing slash stripped", () => {
+  expect(normalizeScopeRepo(undefined)).toBeNull();
+  expect(normalizeScopeRepo(null)).toBeNull();
+  expect(normalizeScopeRepo("")).toBeNull();
+  expect(normalizeScopeRepo("   ")).toBeNull();
+  expect(normalizeScopeRepo("/repo")).toBe("/repo");
+  expect(normalizeScopeRepo("/repo/")).toBe("/repo");
+  expect(normalizeScopeRepo("/repo///")).toBe("/repo");
+  expect(normalizeScopeRepo("/")).toBe("/");
+});
+
+test("partitionRepoFirst is stable and keeps unknowns global", () => {
+  const a = { ...commandRow("a"), repo: "/r" };
+  const b = { ...commandRow("b"), repo: "/o" };
+  const c = { ...commandRow("c"), repo: null };
+  expect(partitionRepoFirst([a, b, c], null)).toEqual([a, b, c]);
+  expect(partitionRepoFirst([b, a, c], "/r").map((r) => r.command)).toEqual([
+    "a",
+    "b",
+    "c",
+  ]);
+});
+
+function seedRepos(): void {
+  bulkInsert([entry("deploy alpha service", 1), entry("deploy beta service", 2)]);
+  applyExitCodes(
+    new Map([
+      ["deploy alpha service", { exit: 0, cwd: "/r", repo: "/r" }],
+      ["deploy beta service", { exit: 0, cwd: "/o", repo: "/o" }],
+    ])
+  );
+}
+
+test("searchCommands repo boost sorts same-repo first, global by default", () => {
+  initDb(dbPath());
+  seedRepos();
+  const scoped = searchCommands("deploy service", { repo: "/r" }).map((r) => r.command);
+  expect(scoped[0]).toBe("deploy alpha service");
+  // No scope: both present (order is relevance/recency, not repo).
+  expect(searchCommands("deploy service", 10)).toHaveLength(2);
+  // Trailing-slash form scopes identically.
+  expect(
+    searchCommands("deploy service", { repo: "/r/" }).map((r) => r.command)[0]
+  ).toBe("deploy alpha service");
+});
+
+test("searchCommands onlyRepo restricts strictly, unknowns excluded", () => {
+  initDb(dbPath());
+  seedRepos();
+  bulkInsert([entry("deploy gamma service", 3)]); // repo NULL (pre-hook)
+  const strict = searchCommands("deploy service", { repo: "/r", onlyRepo: true });
+  expect(strict.map((r) => r.command)).toEqual(["deploy alpha service"]);
+  // onlyRepo without a repo degrades to global (never empty by accident).
+  expect(
+    searchCommands("deploy service", { onlyRepo: true }).length
+  ).toBeGreaterThanOrEqual(2);
+});
+
+test("getRecentCommands repo scope keeps chronology within groups", () => {
+  initDb(dbPath());
+  seedRepos();
+  bulkInsert([entry("deploy gamma recent", 3)]);
+  applyExitCodes(new Map([["deploy gamma recent", { exit: 0, cwd: "/r", repo: "/r" }]]));
+  const scoped = getRecentCommands({ repo: "/r", limit: 10 }).map((r) => r.command);
+  // Both /r rows first (newest first within the group), then /o.
+  expect(scoped.slice(0, 2)).toEqual(["deploy gamma recent", "deploy alpha service"]);
+  expect(scoped).toContain("deploy beta service");
+  const strict = getRecentCommands({ repo: "/o", onlyRepo: true, limit: 10 });
+  expect(strict.map((r) => r.command)).toEqual(["deploy beta service"]);
+});
+
+test("searchByError keeps exact-first, then repo, then recency", () => {
+  initDb(dbPath());
+  bulkInsert([entry("run alpha fail", 1), entry("run beta fail", 2)]);
+  applyExitCodes(
+    new Map([
+      ["run alpha fail", { exit: 1, cwd: "/o", repo: "/o", stderr: "ValueError: bad thing" }],
+      ["run beta fail", { exit: 1, cwd: "/r", repo: "/r", stderr: "ValueError: bad thing" }],
+    ])
+  );
+  const scoped = searchByError("ValueError: bad thing", { repo: "/r" });
+  expect(scoped.map((r) => r.command)[0]).toBe("run beta fail");
+  const strict = searchByError("ValueError: bad thing", { repo: "/r", onlyRepo: true });
+  expect(strict.map((r) => r.command)).toEqual(["run beta fail"]);
+});
+
+test("getProjectProfile counts, splits outcomes, tops tokens", () => {
+  initDb(dbPath());
+  expect(getProjectProfile("")).toBeNull();
+  const empty = getProjectProfile("/r")!;
+  expect(empty.inRepo).toBe(0);
+  expect(formatProjectProfile(empty)).toContain("no indexed commands");
+  bulkInsert([
+    entry("git commit -m one", 10),
+    entry("git push origin", 11),
+    entry("docker ps --all", 12),
+    entry("ls -la elsewhere", 13),
+  ]);
+  applyExitCodes(
+    new Map([
+      ["git commit -m one", { exit: 0, cwd: "/r", repo: "/r" }],
+      ["git push origin", { exit: 1, cwd: "/r", repo: "/r" }],
+      ["docker ps --all", { exit: 0, cwd: "/o", repo: "/o" }],
+    ])
+  );
+  const p = getProjectProfile("/r/")!;
+  expect(p.repo).toBe("/r");
+  expect(p.inRepo).toBe(2);
+  expect(p.totalCommands).toBe(4);
+  expect(p.success).toBe(1);
+  expect(p.failed).toBe(1);
+  expect(p.topTokens.map((t) => t.token)).toContain("git");
+  expect(formatProjectProfile(p)).toContain("profile of /r");
+  expect(formatProjectProfile(null)).toContain("repo_path");
+});
+
+test("getEmbeddingBatch strictRepo pre-filters to one repo", () => {
+  initDb(dbPath());
+  bulkInsert([entry("alpha cmd", 1), entry("beta cmd", 2)]);
+  applyExitCodes(
+    new Map([
+      ["alpha cmd", { exit: 0, cwd: "/r", repo: "/r" }],
+      ["beta cmd", { exit: 0, cwd: "/o", repo: "/o" }],
+    ])
+  );
+  const rows = getCommandsByIds([1, 2]);
+  const ids = rows.map((r) => r.id);
+  storeEmbeddings(ids, ids.map((_, i) => vec(i + 1)), "test-model", EMBEDDING_DIMS);
+  const strict = getEmbeddingBatch("test-model", false, 0, 100, "/r");
+  expect(strict).toHaveLength(1);
+  const got = getCommandsByIds(strict.map((s) => s.id));
+  expect(got[0]?.repo).toBe("/r");
+  // Boost-only path (null strict) still returns both for JS-side partition.
+  expect(getEmbeddingBatch("test-model", false, 0, 100)).toHaveLength(2);
+  expect(getEmbeddingCandidates("test-model", false, "/o")).toHaveLength(1);
+});
+
+// ---------------------------------------------------------------------------
+// mdTable: the shared tabular renderer. Pipes/newlines in hostile command
+// text must never break the table shape.
+// ---------------------------------------------------------------------------
+
+test("mdCell escapes pipes, collapses newlines, truncates", () => {
+  expect(mdCell("echo a|b")).toBe("echo a\\|b");
+  expect(mdCell("line1\nline2\n  line3")).toBe("line1 ↵ line2 ↵ line3");
+  expect(mdCell("abcdef", 5)).toBe("abcd…");
+  expect(mdCell("  spaced   out  ")).toBe("spaced out");
+});
+
+test("mdTable renders headers, alignment, and equal pipe counts", () => {
+  const t = mdTable(
+    ["Name", { header: "N", align: "right" }],
+    [
+      ["a|b", "1"],
+      ["multi\nline", "22"],
+    ]
+  );
+  const lines = t.split("\n");
+  expect(lines[0]).toBe("| Name | N |");
+  expect(lines[1]).toBe("| --- | ---: |");
+  expect(lines[2]).toBe("| a\\|b | 1 |");
+  expect(lines[3]).toContain("↵");
+  // Every line carries the same column count (count unescaped pipes —
+  // escaped cell pipes don't delimit columns).
+  const cols = (l: string): number => l.replace(/\\\|/g, "").split("|").length;
+  expect(new Set(lines.map(cols)).size).toBe(1);
+});
+
+test("mdTable caps runaway rows with a trailing note", () => {
+  const rows = Array.from({ length: 150 }, (_, i) => [`r${i}`, "x"]);
+  const t = mdTable(["A", "B"], rows);
+  expect(t.split("\n").filter((l) => l.startsWith("|"))).toHaveLength(102);
+  expect(t).toContain("… and 50 more rows");
+});
+
+test("exitBadge and shortDateTime shape table cells", () => {
+  expect(exitBadge(0)).toBe("✅ 0");
+  expect(exitBadge(2)).toBe("❌ 2");
+  expect(exitBadge(null)).toBe("—");
+  expect(shortDateTime(0)).toBe("01-01 00:00");
+  expect(shortDateTime(0, true)).toBe("01-01 00:00~");
 });

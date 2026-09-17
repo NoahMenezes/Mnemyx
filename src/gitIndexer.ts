@@ -11,7 +11,7 @@
 
 import { statSync } from "node:fs";
 import { normalize, resolve, sep } from "node:path";
-import { bulkInsertCommits, sanitizeForDisplay } from "./db.ts";
+import { bulkInsertCommits, mdTable, sanitizeForDisplay, shortDay } from "./db.ts";
 import { discoverReposFromConfig } from "./repoScanner.ts";
 import { redactSecrets, REDACTED } from "./redact.ts";
 import { loadConfig } from "./config.ts";
@@ -230,13 +230,16 @@ export function getCommitGraph(repoPath: string, limit = 15): string | null {
         ? out.slice(0, MAX_GRAPH_CHARS) + "\n… [truncated]"
         : out;
     // Plain fence (no language): graph glyphs must not recolor as diff.
-    // The [redacted] meta-note (if any) stays OUTSIDE the fence.
+    // The [redacted] meta-note (if any) stays OUTSIDE the fence. A header
+    // line above the fence names the repo for agents juggling N repos.
     const masked = redactGitOutput(cut);
     const noteIdx = masked.lastIndexOf(`\n(${REDACTED}:`);
+    const shownCount = Math.min(n, masked.split("\n").length);
+    const header = `### Log of ${repoPath} (${shownCount} shown)`;
     if (noteIdx >= 0) {
-      return ["```", masked.slice(0, noteIdx), "```", masked.slice(noteIdx + 1)].join("\n");
+      return [header, "```", masked.slice(0, noteIdx), "```", masked.slice(noteIdx + 1)].join("\n");
     }
-    return ["```", masked, "```"].join("\n");
+    return [header, "```", masked, "```"].join("\n");
   } catch {
     return null;
   }
@@ -391,8 +394,8 @@ export function getCommitDiff(
     return r.text;
   };
   let maskedLines = 0;
-  // Changed-file table: tree glyphs + aligned counts, like a review's
-  // file list. Display path prefers the new (b/) side.
+  // Changed-file summary as a table (renders in every agent), then the
+  // fenced diff body. Display path prefers the new (b/) side.
   const shown = shownFiles.slice(0, maxFiles);
   const nameOf = (header: string): string => {
     const parts = header.split(/\s+/);
@@ -401,14 +404,17 @@ export function getCommitDiff(
     const pick = b ?? a ?? parts[parts.length - 1] ?? header;
     return pick.replace(/^[ab]\//, "");
   };
-  const nameWidth = Math.max(...shown.map((f) => nameOf(f.header).length));
   const out: string[] = [
     `diff ${h.slice(0, 7)} (${shownFiles.length} file${shownFiles.length === 1 ? "" : "s"}, +${totalAdded} −${totalDeleted})`,
+    mdTable(
+      ["File", { header: "+", align: "right" }, { header: "−", align: "right" }],
+      shown.map((f) => [
+        nameOf(f.header) + (f.binary ? " (binary)" : ""),
+        f.binary ? "—" : `+${f.added}`,
+        f.binary ? "—" : `−${f.deleted}`,
+      ])
+    ),
   ];
-  shown.forEach((f, i) => {
-    const glyph = i === shown.length - 1 && shownFiles.length <= maxFiles ? "└──" : "├──";
-    out.push(`${glyph} ${nameOf(f.header).padEnd(nameWidth)} +${f.added} −${f.deleted}`);
-  });
   if (shownFiles.length > maxFiles) {
     out.push(`… and ${shownFiles.length - maxFiles} more files (narrow with file=)`);
   }
@@ -488,31 +494,34 @@ export function getRepoStatus(repoPath: string): string | null {
   const rest = first.startsWith("## ") ? lines.slice(1) : lines;
   const branch = first.startsWith("## ") ? first.slice(3) : "(unknown branch)";
   if (rest.length === 0) return `clean — no staged, unstaged, or untracked changes in ${repoPath}`;
-  const staged: string[] = [];
-  const unstaged: string[] = [];
-  const untracked: string[] = [];
+  const staged: [string, string][] = [];
+  const unstaged: [string, string][] = [];
+  const untracked: [string, string][] = [];
   for (const line of rest) {
     const x = line[0] ?? " ";
     const y = line[1] ?? " ";
     const path = line.slice(3);
-    if (x === "?" && y === "?") untracked.push(path);
+    if (x === "?" && y === "?") untracked.push(["??", path]);
     else {
-      if (x !== " " && x !== "?") staged.push(`${x} ${path}`);
-      if (y !== " " && y !== "?") unstaged.push(`${y} ${path}`);
+      if (x !== " " && x !== "?") staged.push([x, path]);
+      if (y !== " " && y !== "?") unstaged.push([y, path]);
     }
   }
   const out: string[] = [`branch: ${branch}`];
-  const push = (label: string, items: string[]): void => {
-    if (items.length === 0) return;
-    out.push(`${label} (${items.length}):`);
-    for (const item of items.slice(0, MAX_STATUS_LINES)) out.push(`  ${item}`);
+  out.push(`staged: ${staged.length} · unstaged: ${unstaged.length} · untracked: ${untracked.length}`);
+  const rows: string[][] = [];
+  const push = (label: string, items: [string, string][]): void => {
+    for (const [code, path] of items.slice(0, MAX_STATUS_LINES)) {
+      rows.push([`${label} (${code})`, path]);
+    }
     if (items.length > MAX_STATUS_LINES) {
-      out.push(`  … [truncated, ${items.length - MAX_STATUS_LINES} more]`);
+      rows.push([label, `… [${items.length - MAX_STATUS_LINES} more]`]);
     }
   };
   push("staged", staged);
   push("unstaged", unstaged);
   push("untracked", untracked);
+  if (rows.length > 0) out.push(mdTable(["Status", "File"], rows));
   return redactGitOutput(out.join("\n"));
 }
 
@@ -596,9 +605,8 @@ export function getFileHistory(
   return out;
 }
 
-// One file's history rendered for an LLM: short hash, date, +A −D,
-// message — the file-level answer to "what changed here". Rows aligned
-// in a plain fence so dates and counts column-line up in monospace.
+// One file's history rendered as a table: short hash, date, +A −D,
+// message — the file-level answer to "what changed here".
 export function formatFileHistory(
   repoPath: string,
   relPath: string,
@@ -607,17 +615,18 @@ export function formatFileHistory(
   if (entries.length === 0) {
     return `No history for ${relPath} in ${repoPath} (untracked, bad path, or not a repo).`;
   }
-  const addW = Math.max(...entries.map((e) => `+${e.added}`.length));
-  const delW = Math.max(...entries.map((e) => `−${e.deleted}`.length));
-  const rows = entries.map((e) => {
-    const date = new Date(e.authorTs * 1000).toISOString().slice(0, 10);
-    const counts = `${`+${e.added}`.padEnd(addW)} ${`−${e.deleted}`.padEnd(delW)}`;
-    return `${e.hash.slice(0, 7)} ${date} ${counts} ${sanitizeForDisplay(e.message).slice(0, 200)}`;
-  });
+  const rows = entries.map((e) => [
+    e.hash.slice(0, 7),
+    shortDay(e.authorTs),
+    `+${e.added}`,
+    `−${e.deleted}`,
+    sanitizeForDisplay(e.message),
+  ]);
   return [
     `history of ${relPath} (${entries.length} commits, newest first):`,
-    "```",
-    ...rows,
-    "```",
+    mdTable(
+      ["Commit", "Date", { header: "+", align: "right" }, { header: "−", align: "right" }, { header: "Message", maxWidth: 120 }],
+      rows
+    ),
   ].join("\n");
 }
