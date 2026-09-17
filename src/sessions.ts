@@ -29,6 +29,7 @@ import {
   fencedBox,
   shortDateTime,
   formatDuration,
+  sanitizeForDisplay,
   type CommandRow,
   type GitCommit,
 } from "./db.ts";
@@ -99,7 +100,9 @@ function topTokensFor(commands: CommandRow[], n = 5): { token: string; count: nu
   const denied = new Set(loadConfig().denylist);
   const counts = new Map<string, number>();
   for (const c of commands) {
-    const tok = firstToken(c.command);
+    // Sanitize first: colored prompts embed ANSI escapes whose fragments
+    // (e.g. "51;109;39m") would otherwise surface as garbage tokens.
+    const tok = firstToken(sanitizeForDisplay(c.command));
     if (!tok || denied.has(tok)) continue;
     counts.set(tok, (counts.get(tok) ?? 0) + 1);
   }

@@ -7,7 +7,7 @@
 
 import { getDb } from "./connection.ts";
 import { normalizeScopeRepo } from "./scope.ts";
-import { fencedBox } from "./format.ts";
+import { fencedBox, sanitizeForDisplay } from "./format.ts";
 import { loadConfig, firstToken } from "../config.ts";
 import type { ProjectProfile } from "./types.ts";
 
@@ -57,7 +57,8 @@ export function getProjectProfile(repoPath: string): ProjectProfile | null {
   ).all(repo) as { command: string }[];
   const counts = new Map<string, number>();
   for (const r of rows) {
-    const tok = firstToken(r.command);
+    // Sanitize first (see sessions.ts): ANSI fragments must not top tokens.
+    const tok = firstToken(sanitizeForDisplay(r.command));
     if (!tok || denied.has(tok)) continue;
     counts.set(tok, (counts.get(tok) ?? 0) + 1);
   }

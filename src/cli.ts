@@ -9,6 +9,7 @@ import { collectStatus, printStatus } from "./cli/status.ts";
 import { cmdInit } from "./cli/init.ts";
 import { cmdRun } from "./cli/run.ts";
 import { cmdExport } from "./cli/exportCmd.ts";
+import { cmdDashboard } from "./cli/dashboardCmd.ts";
 
 function usage(): string {
   return `mnemyx v${VERSION} — searchable memory of your shell history (local-first)
@@ -20,6 +21,7 @@ Usage:
   mnemyx run -- <cmd...>                               Run a command, log its exit + stderr tail locally
   mnemyx export (--session <id> | --commit <hash>) [--with-diff] [--out FILE] [--force]
                                                            Shareable redacted markdown (stdout, or FILE owner-only)
+  mnemyx dashboard [--port 4877] [--no-open]               Local-only web UI (timeline, search, sessions)
   mnemyx --help | -h                                   This text
   mnemyx --version | -v                                Print version`;
 }
@@ -51,6 +53,9 @@ async function main(argv: string[]): Promise<number> {
   }
   if (cmd === "export") {
     return await cmdExport(rest);
+  }
+  if (cmd === "dashboard") {
+    return await cmdDashboard(rest);
   }
   if (cmd === "bench") {    const { runBench, formatBench } = await import("./bench.ts");
     let rows: number | undefined;

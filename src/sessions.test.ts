@@ -154,6 +154,13 @@ test("commits in the window attach same-repo first", () => {
   expect(s?.commits.map((c) => c.hash)).toEqual(["b".repeat(40), "a".repeat(40)]);
 });
 
+test("top tokens ignore ANSI escape fragments", () => {
+  initDb(dbPath());
+  seed([{ command: "\x1b[32mgreen deploy", timestamp: 9000, repo: "/r" }]);
+  const [s] = clusterSessions({ gapMinutes: 30 });
+  expect(s?.topTokens.map((t) => t.token)).toEqual(["green"]);
+});
+
 test("session ids are content-derived and stable", () => {
   initDb(dbPath());
   seed([{ command: "stable cmd", timestamp: 7000, repo: "/my-proj" }]);

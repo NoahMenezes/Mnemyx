@@ -187,6 +187,16 @@ Usage examples (as you'd prompt your assistant):
 
 **Sharing work.** `mnemyx export --session <id> [--out notes.md] [--force]` and `mnemyx export --commit <hash> [--with-diff]` print the same redacted markdown to stdout (pipe it to `pbcopy`, or `--out` a file — owner-only, never overwritten without `--force`). A `source: mnemyx export` header records the date and redaction count; secrets stay `[redacted]` because export reuses the already-masked display text — there is no raw path through it.
 
+## Dashboard (local-only web UI)
+
+Prefer browsing to prompting? `mnemyx dashboard` serves a read-only web UI on `http://127.0.0.1:4877` and opens your browser:
+
+```bash
+mnemyx dashboard [--port 4877] [--no-open]
+```
+
+Tabs for search (keyword/auto, repo scope, exit-0 filter), sessions (click a row for commands + commits), commits, error search, and a status page — real HTML tables, dark terminal theme, secrets masked end to end (the JSON API reuses the same redact-then-display pipeline as the MCP tools, and the page escapes everything it renders). Safety rules: binds loopback only (never `0.0.0.0`), GET-only (no mutations — reindex/export stay in CLI/MCP), `--no-open` for SSH/headless, Ctrl+C stops and nothing persists.
+
 **Reading tables.** History, commits, sessions, diffs, and status all render as bordered tables inside `text` fences — quote them verbatim instead of reformatting:
 
 ```text
@@ -428,6 +438,11 @@ src/
     init.ts         #   setup wizard (consent-gated hook install)
     run.ts          #   transparent run wrapper (exit + stderr capture)
     exportCmd.ts    #   shareable redacted markdown export
+    dashboardCmd.ts #   local-only web UI launcher
+  dashboard/        # Phase 10 local web UI (read-only, loopback-only):
+    server.ts       #   Bun.serve wiring (127.0.0.1, GET-only routes)
+    api.ts          #   masked JSON handlers (same queries as MCP tools)
+    page.html       #   single-file UI (tabs, tables, no dependencies)
   cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
   db.ts             # barrel: re-exports src/db/* (public API unchanged)
