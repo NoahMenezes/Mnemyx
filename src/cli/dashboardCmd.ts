@@ -49,7 +49,7 @@ export async function cmdDashboard(rawArgs: string[]): Promise<number> {
     }
   }
   try {
-    const server = serveDashboard({ port });
+    const server = await serveDashboard({ port });
     const url = `http://${server.hostname}:${server.port}`;
     if (!noOpen) openBrowser(url);
     // Block until Ctrl+C (the server owns no other handles to wait on).
