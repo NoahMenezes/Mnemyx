@@ -14,7 +14,7 @@ import {
   formatErrorRows,
   getProjectProfile,
   formatProjectProfile,
-  mdTable,
+  fencedBox,
   type CommandRow,
 } from "./db.ts";
 import { runImport } from "./import.ts";
@@ -60,7 +60,7 @@ const server = new McpServer({
 
 server.tool(
   "search_history",
-  "Search your past shell commands. Understands natural phrasing via local semantic search (e.g. 'docker wont start' finds a past systemctl restart docker fix), with keyword fallback. Proven-successful commands (exit 0, from the opt-in shell hook) rank first and failures last. Common noise commands (ls, cd, clear, …) are filtered out. Each hit is annotated [exit N] when its outcome is known. Pass repo_path to scope to one project (same-repo hits first); only_repo restricts strictly. Omit both for global search.",
+  "Search your past shell commands. Understands natural phrasing via local semantic search (e.g. 'docker wont start' finds a past systemctl restart docker fix), with keyword fallback. Proven-successful commands (exit 0, from the opt-in shell hook) rank first and failures last. Common noise commands (ls, cd, clear, …) are filtered out. Each hit is annotated [exit N] when its outcome is known. Pass repo_path to scope to one project (same-repo hits first); only_repo restricts strictly. Omit both for global search. Results arrive as a preformatted bordered table — quote it verbatim, do not reformat into bullets.",
   {
     query: z.string().describe("Keyword or natural-language query"),
     limit: z
@@ -151,7 +151,7 @@ server.tool(
 
 server.tool(
   "search_by_error",
-  "Search your past FAILED commands by error message. Paste a traceback or error line — it is normalized (paths, pids, line numbers stripped) and matched against real past stderr, exact matches first. Each hit shows the command plus the error output proving the match. Pass repo_path to prefer this project's failures; only_repo restricts strictly.",
+  "Search your past FAILED commands by error message. Paste a traceback or error line — it is normalized (paths, pids, line numbers stripped) and matched against real past stderr, exact matches first. Each hit shows the command plus the error output proving the match. Pass repo_path to prefer this project's failures; only_repo restricts strictly. Results arrive as a preformatted bordered table plus fenced error proof — quote verbatim, do not reformat.",
   {
     error_text: z.string().describe("The error message or traceback to match"),
     limit: z
@@ -186,7 +186,7 @@ server.tool(
 
 server.tool(
   "get_recent_commands",
-  "Return the N most recent shell commands. Useful for general context without a specific search query. Pass repo_path to see this project's recent commands first; only_repo restricts strictly.",
+  "Return the N most recent shell commands. Useful for general context without a specific search query. Pass repo_path to see this project's recent commands first; only_repo restricts strictly. Results arrive as a preformatted bordered table — quote it verbatim, do not reformat into bullets.",
   {
     limit: z
       .number()
@@ -236,7 +236,7 @@ server.tool(
 
 server.tool(
   "search_commits",
-  "Search indexed git commit messages and file lists across your local repos. Returns hash, date, message, files, and repo path so results are attributable.",
+  "Search indexed git commit messages and file lists across your local repos. Returns hash, date, message, files, and repo path so results are attributable. Results arrive as a preformatted bordered table — quote it verbatim.",
   {
     query: z.string().describe("Keyword query over commit messages and file paths"),
     limit: z
@@ -357,7 +357,7 @@ server.tool(
       content: [
         {
           type: "text" as const,
-          text: mdTable(["Line", "File", "Commit"], [
+          text: fencedBox(["Line", "File", "Commit"], [
             [String(line_number), file_path, blamedHash.slice(0, 7)],
           ]) + `\n\n${story}`,
         },
@@ -376,7 +376,7 @@ server.tool(
       r.errors > r.failures.length ? `\n… and ${r.errors - r.failures.length} more skipped` : "";
     const skipped =
       r.failures.length > 0
-        ? `\n\nSkipped:\n${mdTable(
+        ? `\n\nSkipped:\n${fencedBox(
             ["Repo", "Reason"],
             r.failures.map((f) => [f.repo, f.reason])
           )}${extra}`
@@ -425,7 +425,7 @@ server.tool(
 
 server.tool(
   "get_commit_diff",
-  "Unified diff for one commit, rendered like a code-review view: per-file +added −removed counts, @@ hunks, context and +/- lines. Capped (120 lines, 5 files) with truncation markers; secrets masked; binaries collapsed to one line. Works even for commits the index hasn't seen (reads git directly).",
+  "Unified diff for one commit, rendered like a code-review view: per-file +added −removed counts, @@ hunks, context and +/- lines. Capped (120 lines, 5 files) with truncation markers; secrets masked; binaries collapsed to one line. Works even for commits the index hasn't seen (reads git directly). Results arrive preformatted (bordered file table plus fenced diff) — quote verbatim.",
   {
     commit_hash: z.string().describe("Full commit hash or short prefix"),
     repo_path: z
@@ -496,7 +496,7 @@ server.tool(
 
 server.tool(
   "get_repo_status",
-  "What's dirty right now in one local repo: branch + ahead/behind, staged, unstaged, and untracked files. Cheap — call it before editing to know the starting state.",
+  "What's dirty right now in one local repo: branch + ahead/behind, staged, unstaged, and untracked files. Cheap — call it before editing to know the starting state. Results arrive as a preformatted bordered table — quote it verbatim.",
   {
     repo_path: z.string().describe("Absolute path of the repo"),
   },
@@ -515,7 +515,7 @@ server.tool(
 
 server.tool(
   "get_file_history",
-  "Every commit that touched one file (follows renames), newest first, each with +added −removed counts for that file. The file-level answer to 'what changed here'.",
+  "Every commit that touched one file (follows renames), newest first, each with +added −removed counts for that file. The file-level answer to 'what changed here'. Results arrive as a preformatted bordered table — quote it verbatim.",
   {
     repo_path: z.string().describe("Absolute path of the repo"),
     file_path: z.string().describe("File path relative to the repo root"),
@@ -539,7 +539,7 @@ server.tool(
 
 server.tool(
   "list_sessions",
-  "Bursts of related commands (+ the commits they led to) grouped into sessions — the neat overview of what you worked on. One table row per session, newest first. Pass repo_path for this project's sessions; sessions split on 30 min of quiet (tunable) or a repo switch.",
+  "Bursts of related commands (+ the commits they led to) grouped into sessions — the neat overview of what you worked on. One table row per session, newest first. Pass repo_path for this project's sessions; sessions split on 30 min of quiet (tunable) or a repo switch. Results arrive as a preformatted bordered table — quote it verbatim, do not reformat into bullets.",
   {
     limit: z
       .number()
@@ -589,7 +589,7 @@ server.tool(
 
 server.tool(
   "get_session",
-  "Full detail for one session from list_sessions: timing, outcomes, the commands in story order, and the commits they led to. Session ids shift as new commands land — refresh via list_sessions when one misses.",
+  "Full detail for one session from list_sessions: timing, outcomes, the commands in story order, and the commits they led to. Session ids shift as new commands land — refresh via list_sessions when one misses. Results arrive preformatted (bordered tables plus fenced blocks) — quote verbatim.",
   {
     session_id: z.string().describe("Session id from list_sessions (e.g. s1726069200-myproj)"),
     gap_minutes: z

@@ -11,7 +11,7 @@
 
 import { statSync } from "node:fs";
 import { normalize, resolve, sep } from "node:path";
-import { bulkInsertCommits, mdTable, sanitizeForDisplay, shortDay } from "./db.ts";
+import { bulkInsertCommits, fencedBox, sanitizeForDisplay, shortDay } from "./db.ts";
 import { discoverReposFromConfig } from "./repoScanner.ts";
 import { redactSecrets, REDACTED } from "./redact.ts";
 import { loadConfig } from "./config.ts";
@@ -406,7 +406,7 @@ export function getCommitDiff(
   };
   const out: string[] = [
     `diff ${h.slice(0, 7)} (${shownFiles.length} file${shownFiles.length === 1 ? "" : "s"}, +${totalAdded} −${totalDeleted})`,
-    mdTable(
+    fencedBox(
       ["File", { header: "+", align: "right" }, { header: "−", align: "right" }],
       shown.map((f) => [
         nameOf(f.header) + (f.binary ? " (binary)" : ""),
@@ -521,7 +521,7 @@ export function getRepoStatus(repoPath: string): string | null {
   push("staged", staged);
   push("unstaged", unstaged);
   push("untracked", untracked);
-  if (rows.length > 0) out.push(mdTable(["Status", "File"], rows));
+  if (rows.length > 0) out.push(fencedBox(["Status", "File"], rows));
   return redactGitOutput(out.join("\n"));
 }
 
@@ -624,7 +624,7 @@ export function formatFileHistory(
   ]);
   return [
     `history of ${relPath} (${entries.length} commits, newest first):`,
-    mdTable(
+    fencedBox(
       ["Commit", "Date", { header: "+", align: "right" }, { header: "−", align: "right" }, { header: "Message", maxWidth: 120 }],
       rows
     ),

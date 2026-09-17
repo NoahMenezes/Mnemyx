@@ -292,7 +292,8 @@ test("getRepoStatus labels staged/unstaged/untracked, clean when empty", () => {
   expect(dirty).toContain("a.txt");
   expect(dirty).toContain("untracked");
   expect(dirty).toContain("new.txt");
-  expect(dirty).toContain("| Status | File |");
+  expect(dirty).toContain("│ Status");
+  expect(dirty).toContain("│ File");
   expect(getRepoStatus(join(dir, "missing"))).toBeNull();
 });
 
@@ -324,17 +325,19 @@ test("diff design: fenced body, file summary as a table", () => {
   const lines = diff.split("\n");
   // Summary + table outside the fence, body fenced exactly once.
   expect(lines[0]).toMatch(/^diff [0-9a-f]{7} \(1 file, \+2 −1\)$/);
-  expect(diff).toContain("| File | + | − |");
+  expect(diff).toContain("│ File");
   const tableRow = lines.find((l) => l.includes("code.txt"));
   expect(tableRow).toContain("+2");
   expect(tableRow).toContain("−1");
   const fenceIdx = lines.map((l, i) => (l === "```diff" ? i : -1)).filter((i) => i >= 0);
   const closeIdx = lines.map((l, i) => (l === "```" ? i : -1)).filter((i) => i >= 0);
   expect(fenceIdx).toHaveLength(1);
-  expect(closeIdx).toHaveLength(1);
-  expect(closeIdx[0] as number).toBeGreaterThan(fenceIdx[0] as number);
-  // Hunk body inside the fence.
-  const body = lines.slice((fenceIdx[0] as number) + 1, closeIdx[0] as number).join("\n");
+  // Two closings: the ```text summary table, then the ```diff body.
+  expect(closeIdx).toHaveLength(2);
+  const diffClose = closeIdx[closeIdx.length - 1] as number;
+  expect(diffClose).toBeGreaterThan(fenceIdx[0] as number);
+  // Hunk body inside the diff fence.
+  const body = lines.slice((fenceIdx[0] as number) + 1, diffClose).join("\n");
   expect(body).toContain("@@");
   expect(body).toContain("-two");
   expect(body).toContain("+TWO");
@@ -386,6 +389,6 @@ test("file-history design: markdown table with counts", () => {
   Bun.spawnSync(["git", "commit", "-qm", "add two"], { cwd: repo, env: gitEnv() });
   const entries = getFileHistory(repo, "f.txt", 10);
   const text = formatFileHistory(repo, "f.txt", entries);
-  expect(text).toContain("| Commit | Date |");
+  expect(text).toContain("│ Commit");
   expect(text).toContain("+2");
 });

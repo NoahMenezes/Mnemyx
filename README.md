@@ -183,29 +183,37 @@ Usage examples (as you'd prompt your assistant):
 - *"Use mnemyx list_sessions for this repo"* → recent work bursts as a table (when, how long, outcomes, commits, top commands).
 - *"Use mnemyx get_session for s1726069200-myproj"* → that burst in full: commands in story order + the commits they led to.
 
-**Reading tables.** History, commits, sessions, diffs, and status all render as markdown tables your agent can quote:
+**Reading tables.** History, commits, sessions, diffs, and status all render as bordered tables inside `text` fences — quote them verbatim instead of reformatting:
 
 ```text
-| # | Date | Shell | Exit | Command |
-| --- | --- | --- | --- | --- |
-| 1 | 09-16 14:22 | zsh | ✅ 0 | sudo systemctl enable --now docker |
-| 2 | 09-16 14:20 | bash | ❌ 1 | python3 train.py --lr 0.01 |
-
-| Session | When | Dur | Repo | Cmds | ok/fail/? | Commits | Top |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| s1726069200-mnemyx | 09-16 14:02→14:41 | 39m | mnemyx | 18 | 14/2/2 | a1b2c3d | git, docker, bun |
+┌───┬─────────────┬───────┬──────┬───────────────────────────────────┐
+│ # │ Date        │ Shell │ Exit │ Command                           │
+├───┼─────────────┼───────┼──────┼───────────────────────────────────┤
+│ 1 │ 09-16 14:22 │ zsh   │ ✅ 0 │ sudo systemctl enable --now …     │
+│ 2 │ 09-16 14:20 │ bash  │ ❌ 1 │ python3 train.py --lr 0.01        │
+└───┴─────────────┴───────┴──────┴───────────────────────────────────┘
 ```
 
-Multiline commands collapse newlines to `↵` so rows never break; `|` inside commands is escaped; secrets mask to `[redacted]` inside cells.
+```text
+┌──────────────────┬───────────────────┬─────┬──────┬──────┬───────────┬─────────┬───────────┐
+│ Session          │ When              │ Dur │ Repo │ Cmds │ ok/fail/? │ Commits │ Top       │
+├──────────────────┼───────────────────┼─────┼──────┼──────┼───────────┼─────────┼───────────┤
+│ s1726069200-mn…  │ 09-16 14:02→14:41 │ 39m │ mn…  │   18 │ 14/2/2    │ a1b2c3d │ git, docker │
+└──────────────────┴───────────────────┴─────┴──────┴──────┴───────────┴─────────┴───────────┘
+```
+
+Multiline commands collapse newlines to `↵` so rows never break; `|` inside commands needs no escaping against drawn borders; secrets mask to `[redacted]` inside cells.
 
 **Reading diffs.** `get_commit_diff` renders close to a side-by-side review, in plain text your agent can quote:
 
 ```text
 diff b77d1e0 (5 files, +447 −4)
-| File | + | − |
-| --- | ---: | ---: |
-| README.md | +4 | −1 |
-| src/config.ts | +89 | −3 |
+┌──────────────────┬─────┬────┐
+│ File             │ +   │ −  │
+├──────────────────┼─────┼────┤
+│ README.md        │ +4  │ −1 │
+│ src/config.ts    │ +89 │ −3 │
+└──────────────────┴─────┴────┘
 ```diff
 --- a/README.md b/README.md | +4 −1
 --- a/README.md

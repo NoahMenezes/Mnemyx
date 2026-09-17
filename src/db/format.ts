@@ -44,45 +44,123 @@ export interface TableColumn {
 }
 
 /**
- * One table cell of already display-ready text (sanitized + redacted by
- * the caller): collapses newlines to ↵ (a table row must stay one line),
- * escapes pipes (commands contain them constantly), squeezes whitespace,
- * and truncates past maxWidth. Exported for tests.
+ * Terminal display width: most chars count 1, CJK wide chars and emoji
+ * (✅ ❌ ─ │ …) count 2, combining marks count 0. Box borders only line
+ * up when padding uses this instead of string length. Best-effort ranges
+ * (East Asian Wide/Fullwidth + emoji blocks) — exported for tests.
  */
-export function mdCell(text: string, maxWidth?: number): string {
-  let out = text.replace(/\s*\n\s*/g, " ↵ ").replace(/\|/g, "\\|");
-  out = out.replace(/[ \t]+/g, " ").trim();
-  if (maxWidth !== undefined && maxWidth > 0 && out.length > maxWidth) {
-    out = out.slice(0, Math.max(0, maxWidth - 1)) + "…";
+export function dispWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) as number;
+    if (cp >= 0x0300 && cp <= 0x036f) continue; // combining marks
+    if (
+      (cp >= 0x1100 && cp <= 0x115f) ||
+      cp === 0x2329 ||
+      cp === 0x232a ||
+      (cp >= 0x2e80 && cp <= 0x303e) ||
+      (cp >= 0x3041 && cp <= 0xa4cf) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe30 && cp <= 0xfe4f) ||
+      (cp >= 0xff00 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x2600 && cp <= 0x27bf) ||
+      (cp >= 0x2b00 && cp <= 0x2bff) ||
+      (cp >= 0x1f300 && cp <= 0x1faff)
+    ) {
+      w += 2;
+    } else {
+      w += 1;
+    }
+  }
+  return w;
+}
+
+/**
+ * One table cell of already display-ready text (sanitized + redacted by
+ * the caller): collapses newlines to ↵ (a row must stay one line),
+ * squeezes whitespace, truncates past maxWidth by display width with ….
+ * Pipes need no escaping — borders are drawn, not delimited. Exported
+ * for tests.
+ */
+export function boxCell(text: string, maxWidth?: number): string {
+  let out = text.replace(/\s*\n\s*/g, " ↵ ").replace(/[ \t]+/g, " ").trim();
+  if (maxWidth !== undefined && maxWidth > 0 && dispWidth(out) > maxWidth) {
+    let acc = "";
+    let w = 0;
+    for (const ch of out) {
+      const cw = dispWidth(ch);
+      if (w + cw > maxWidth - 1) break;
+      acc += ch;
+      w += cw;
+    }
+    out = `${acc}…`;
   }
   return out;
 }
 
+function padCell(s: string, width: number, right: boolean): string {
+  const pad = Math.max(0, width - dispWidth(s));
+  return right ? `${" ".repeat(pad)}${s}` : `${s}${" ".repeat(pad)}`;
+}
+
 /**
- * GitHub-flavored markdown table. The shared builder every tool uses, so
- * all tabular output escapes, truncates, and caps identically. Rows past
- * MAX_TABLE_ROWS are cut with a trailing "… and N more" line (outside the
- * table, so it never breaks column counts).
+ * Bordered Unicode table (rounded corners) — the shared builder every
+ * tool uses, so all tabular output truncates, pads, and caps identically.
+ * Rendered inside ```text fences by callers: agents pass fenced blocks
+ * through verbatim instead of paraphrasing them into bullets. Rows past
+ * MAX_TABLE_ROWS are cut with a trailing "… and N more" line outside the
+ * table, so borders never break.
  */
-export function mdTable(
+export function boxTable(
   headers: (string | TableColumn)[],
   rows: string[][]
 ): string {
   const cols: TableColumn[] = headers.map((h) =>
     typeof h === "string" ? { header: h } : h
   );
-  const head = `| ${cols.map((c) => c.header).join(" | ")} |`;
-  const sep = `| ${cols.map((c) => (c.align === "right" ? "---:" : "---")).join(" | ")} |`;
-  const capped = rows.slice(0, MAX_TABLE_ROWS);
-  const body = capped.map((r) => {
-    const cells = cols.map((c, i) => mdCell(r[i] ?? "", c.maxWidth));
-    return `| ${cells.join(" | ")} |`;
+  const cells = rows
+    .slice(0, MAX_TABLE_ROWS)
+    .map((r) => cols.map((c, i) => boxCell(r[i] ?? "", c.maxWidth)));
+  const widths = cols.map((c, i) => {
+    let w = dispWidth(c.header);
+    for (const row of cells) w = Math.max(w, dispWidth(row[i] as string));
+    return w;
   });
-  const out = [head, sep, ...body].join("\n");
-  if (rows.length > capped.length) {
-    return `${out}\n… and ${rows.length - capped.length} more rows`;
+  const rule = (l: string, m: string, r: string): string =>
+    l + widths.map((w) => "─".repeat(w + 2)).join(m) + r;
+  const line = (items: string[], alignsRight: boolean[]): string =>
+    `│ ${items
+      .map((s, i) => padCell(s, widths[i] as number, alignsRight[i] === true))
+      .join(" │ ")} │`;
+  const out = [
+    rule("┌", "┬", "┐"),
+    line(
+      cols.map((c) => c.header),
+      cols.map(() => false)
+    ),
+    rule("├", "┼", "┤"),
+    ...cells.map((row) =>
+      line(
+        row,
+        cols.map((c) => c.align === "right")
+      )
+    ),
+    rule("└", "┴", "┘"),
+  ];
+  if (rows.length > cells.length) {
+    out.push(`… and ${rows.length - cells.length} more rows`);
   }
-  return out;
+  return out.join("\n");
+}
+
+/** Box table wrapped in a ```text fence (agents pass fences through). */
+export function fencedBox(
+  headers: (string | TableColumn)[],
+  rows: string[][]
+): string {
+  return ["```text", boxTable(headers, rows), "```"].join("\n");
 }
 
 /** Compact exit badge: ✅ 0 / ❌ N / — (unknown, never implies failure). */
@@ -135,7 +213,7 @@ export function formatRows(rows: CommandRow[]): string {
       shown,
     ];
   });
-  return mdTable(
+  return fencedBox(
     ["#", "Date", "Shell", "Exit", { header: "Command", maxWidth: TABLE_COMMAND_WIDTH }],
     body
   );
@@ -161,7 +239,7 @@ export function formatCommits(rows: GitCommit[]): string {
       repoBase,
     ];
   });
-  return mdTable(
+  return fencedBox(
     [
       "Commit",
       "Date",

@@ -7,7 +7,7 @@
 
 import { getDb } from "./connection.ts";
 import { normalizeScopeRepo } from "./scope.ts";
-import { mdTable } from "./format.ts";
+import { fencedBox } from "./format.ts";
 import { loadConfig, firstToken } from "../config.ts";
 import type { ProjectProfile } from "./types.ts";
 
@@ -96,7 +96,7 @@ export function formatProjectProfile(p: ProjectProfile | null): string {
     p.firstTs !== null ? new Date(p.firstTs * 1000).toISOString().slice(0, 10) : "?";
   const last =
     p.lastTs !== null ? new Date(p.lastTs * 1000).toISOString().slice(0, 10) : "?";
-  const outcomes = mdTable(
+  const outcomes = fencedBox(
     ["Outcome", { header: "Count", align: "right" }],
     [
       ["✅ succeeded", String(p.success)],
@@ -106,7 +106,7 @@ export function formatProjectProfile(p: ProjectProfile | null): string {
   );
   const tops =
     p.topTokens.length > 0
-      ? mdTable(
+      ? fencedBox(
           ["Top command", { header: "Runs", align: "right" }],
           p.topTokens.map((t) => [t.token, String(t.count)])
         )

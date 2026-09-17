@@ -16,7 +16,7 @@ import {
   getCommandsInWindow,
   getCommitsByHash,
   formatRows,
-  mdTable,
+  fencedBox,
   sanitizeForDisplay,
   type CommandRow,
   type GitCommit,
@@ -83,7 +83,7 @@ export function formatCommitStory(
   const date = new Date(commit.authorTs * 1000).toISOString();
   const head = [
     `## What changed — commit ${commit.hash.slice(0, 7)} (${commit.hash})`,
-    mdTable(["Field", "Value"], [
+    fencedBox(["Field", "Value"], [
       ["repo", commit.repoPath],
       ["date", date],
       ["message", sanitizeForDisplay(commit.message)],
@@ -92,7 +92,7 @@ export function formatCommitStory(
   const files =
     commit.filesChanged.length > 0
       ? `### Files (${commit.filesChanged.length})\n` +
-        mdTable(
+        fencedBox(
           [`Files (${commit.filesChanged.length})`],
           commit.filesChanged
             .slice(0, 20)

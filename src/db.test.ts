@@ -28,9 +28,10 @@ import {
   formatErrorRows,
   searchByError,
   sanitizeForDisplay,
-  mdTable,
-  mdCell,
-  exitBadge,
+  boxTable,
+  boxCell,
+  dispWidth,
+  fencedBox,  exitBadge,
   shortDateTime,
   MAX_COMMAND_DISPLAY_LENGTH,
   MAX_QUERY_LENGTH,
@@ -495,10 +496,11 @@ test("formatRows truncates pathological commands with a marker", () => {
   const text = formatRows([commandRow(`echo ${big}`)]);
   // Table cell capped at TABLE_COMMAND_WIDTH with an ellipsis marker.
   expect(text).toContain("…");
-  expect(text.length).toBeLessThan(600);
+  expect(text.length).toBeLessThan(2000);
   expect(formatRows([commandRow("short")])).not.toContain("…");
-  // One table row per command: header + separator + 1 row.
-  expect(text.split("\n").filter((l) => l.startsWith("|"))).toHaveLength(3);
+  // Border integrity: every line inside the fence shares one display width.
+  const inner = text.split("\n").slice(1, -1);
+  expect(new Set(inner.map((l) => dispWidth(l))).size).toBe(1);
 });
 
 test("overlong queries throw instead of burning CPU", () => {  initDb(dbPath());
@@ -650,19 +652,29 @@ test("getEmbeddingBatch strictRepo pre-filters to one repo", () => {
 });
 
 // ---------------------------------------------------------------------------
-// mdTable: the shared tabular renderer. Pipes/newlines in hostile command
-// text must never break the table shape.
+// boxTable: the shared bordered renderer. Hostile command text must never
+// break the borders — every border line shares one display width.
 // ---------------------------------------------------------------------------
 
-test("mdCell escapes pipes, collapses newlines, truncates", () => {
-  expect(mdCell("echo a|b")).toBe("echo a\\|b");
-  expect(mdCell("line1\nline2\n  line3")).toBe("line1 ↵ line2 ↵ line3");
-  expect(mdCell("abcdef", 5)).toBe("abcd…");
-  expect(mdCell("  spaced   out  ")).toBe("spaced out");
+test("boxCell keeps pipes raw, collapses newlines, truncates by width", () => {
+  expect(boxCell("echo a|b")).toBe("echo a|b");
+  expect(boxCell("line1\nline2\n  line3")).toBe("line1 ↵ line2 ↵ line3");
+  expect(boxCell("abcdef", 5)).toBe("abcd…");
+  expect(boxCell("  spaced   out  ")).toBe("spaced out");
+  // Wide chars budget double width: ✅ (2) + a (1) = 3, nothing roomy left.
+  expect(boxCell("✅ab", 3)).toBe("✅…");
 });
 
-test("mdTable renders headers, alignment, and equal pipe counts", () => {
-  const t = mdTable(
+test("dispWidth counts CJK/emoji double, combining zero", () => {
+  expect(dispWidth("abc")).toBe(3);
+  expect(dispWidth("✅")).toBe(2);
+  expect(dispWidth("─")).toBe(1);
+  expect(dispWidth("日本")).toBe(4);
+  expect(dispWidth("é")).toBe(1);
+});
+
+test("boxTable draws aligned borders with rounded corners", () => {
+  const t = boxTable(
     ["Name", { header: "N", align: "right" }],
     [
       ["a|b", "1"],
@@ -670,21 +682,28 @@ test("mdTable renders headers, alignment, and equal pipe counts", () => {
     ]
   );
   const lines = t.split("\n");
-  expect(lines[0]).toBe("| Name | N |");
-  expect(lines[1]).toBe("| --- | ---: |");
-  expect(lines[2]).toBe("| a\\|b | 1 |");
-  expect(lines[3]).toContain("↵");
-  // Every line carries the same column count (count unescaped pipes —
-  // escaped cell pipes don't delimit columns).
-  const cols = (l: string): number => l.replace(/\\\|/g, "").split("|").length;
-  expect(new Set(lines.map(cols)).size).toBe(1);
+  expect(lines[0]).toBe("┌──────────────┬────┐");
+  expect(lines[1]).toBe("│ Name         │ N  │");
+  expect(lines[2]).toBe("├──────────────┼────┤");
+  expect(lines[3]).toBe("│ a|b          │  1 │");
+  expect(lines[4]).toContain("↵");
+  expect(lines[lines.length - 1]).toBe("└──────────────┴────┘");
+  // Border integrity: every line shares one display width.
+  const widths = new Set(lines.map((l: string) => dispWidth(l)));
+  expect(widths.size).toBe(1);
 });
 
-test("mdTable caps runaway rows with a trailing note", () => {
+test("boxTable caps runaway rows with a trailing note", () => {
   const rows = Array.from({ length: 150 }, (_, i) => [`r${i}`, "x"]);
-  const t = mdTable(["A", "B"], rows);
-  expect(t.split("\n").filter((l) => l.startsWith("|"))).toHaveLength(102);
+  const t = boxTable(["A", "B"], rows);
+  expect(t.split("\n").filter((l) => l.startsWith("│"))).toHaveLength(101);
   expect(t).toContain("… and 50 more rows");
+});
+
+test("fencedBox wraps the table in a text fence", () => {
+  const t = fencedBox(["A"], [["x"]]);
+  expect(t.startsWith("```text\n┌")).toBe(true);
+  expect(t.endsWith("┘\n```")).toBe(true);
 });
 
 test("exitBadge and shortDateTime shape table cells", () => {

@@ -26,7 +26,7 @@ import {
   normalizeScopeRepo,
   formatRows,
   formatCommits,
-  mdTable,
+  fencedBox,
   shortDateTime,
   formatDuration,
   type CommandRow,
@@ -239,7 +239,7 @@ export function formatSessions(sessions: Session[]): string {
   if (sessions.length === 0) {
     return "No sessions found in scope (empty history, or nothing recent matches).";
   }
-  return mdTable(
+  return fencedBox(
     ["Session", "When", "Dur", "Repo", { header: "Cmds", align: "right" }, "ok/fail/?", "Commits", "Top"],
     sessions.map((s) => [
       s.id,
@@ -266,7 +266,7 @@ export function formatSession(s: Session | null): string {
   const repoShown = s.repo ?? (s.mixed ? "mixed" : "unknown (no hook context)");
   const head = [
     `## Session \`${s.id}\``,
-    mdTable(["Field", "Value"], [
+    fencedBox(["Field", "Value"], [
       ["repo", repoShown],
       ["window", `${whenRange(s)} (${formatDuration(s.endTs - s.startTs)})`],
       ["commands", String(s.commands.length)],

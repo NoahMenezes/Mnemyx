@@ -161,7 +161,7 @@ test("session ids are content-derived and stable", () => {
   expect(s?.id).toBe("s7000-my-proj");
 });
 
-test("tables render: list is a markdown table, detail has sections", () => {
+test("tables render: bordered list, detail sections, raw pipes", async () => {
   initDb(dbPath());
   expect(formatSessions([])).toContain("No sessions");
   seed([
@@ -172,15 +172,15 @@ test("tables render: list is a markdown table, detail has sections", () => {
   const sessions = clusterSessions({ gapMinutes: 30 });
   expect(sessions).toHaveLength(1);
   const list = formatSessions(sessions);
-  expect(list).toContain("| Session |");
-  // Pipes in commands can't break table rows: every table line has equal
-  // pipe counts, and the literal pipe surfaces escaped in detail rows.
-  const unescaped = (l: string): number => l.replace(/\\\|/g, "").split("|").length;
-  const counts = new Set(list.split("\n").filter((l) => l.startsWith("|")).map(unescaped));
-  expect(counts.size).toBe(1);
+  expect(list).toContain("│ Session");
+  // Border integrity: every table line shares one display width, and the
+  // literal pipe in the command surfaces raw inside its bordered row.
+  const { dispWidth } = await import("./db.ts");
+  const boxLines = list.split("\n").filter((l) => l.startsWith("┌") || l.startsWith("│") || l.startsWith("├") || l.startsWith("└"));
+  expect(new Set(boxLines.map((l) => dispWidth(l))).size).toBe(1);
   const detail = formatSession(sessions[0] ?? null);
   const cmdRow = detail.split("\n").find((l) => l.includes("echo"));
-  expect(cmdRow).toContain("\\|");
+  expect(cmdRow).toContain("a|b");
   expect(detail).toContain("## Session");
   expect(detail).toContain("### Commands");
   expect(detail).toContain("### Commits");

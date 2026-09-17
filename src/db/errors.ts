@@ -16,7 +16,7 @@ import {
   type ErrorSearchOptions,
 } from "./types.ts";
 import { MAX_QUERY_LENGTH, escapeLike, normalizeScopeRepo } from "./scope.ts";
-import { sanitizeForDisplay, mdTable, exitBadge, shortDateTime } from "./format.ts";
+import { sanitizeForDisplay, fencedBox, exitBadge, shortDateTime } from "./format.ts";
 import { loadConfig } from "../config.ts";
 import { redactSecrets } from "../redact.ts";
 import { normalizeError } from "../errorFingerprint.ts";
@@ -89,7 +89,7 @@ export function formatErrorRows(rows: CommandRow[]): string {
     }
     return { r, shown, err };
   });
-  const table = mdTable(
+  const table = fencedBox(
     ["#", "Date", "Exit", { header: "Command", maxWidth: 200 }],
     prepared.map(({ r, shown }, i) => [
       String(i + 1),
