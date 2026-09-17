@@ -14,13 +14,16 @@ import { join, isAbsolute, normalize } from "node:path";
 //
 // Example ~/.mnemyx/config.json:
 //   {
-//     "denylist": ["vim", "nano", "htop"],
-//     "embeddings": true,
-//     "exitCodes": true,
-//     "maxHistoryAgeDays": 365,
-//     "redactPatterns": ["mycompany-internal-\\d+"],
-//     "repoRoots": ["~/dev", "~/projects"]
-//   }
+  //     "denylist": ["vim", "nano", "htop"],
+  //     "embeddings": true,
+  //     "exitCodes": true,
+  //     "maxHistoryAgeDays": 365,
+  //     "redactPatterns": ["mycompany-internal-\\d+"],
+  //     "repoRoots": ["~/dev", "~/projects"],
+  //     "ranking": { "frequencyWeight": 1.0, "recencyHalfLifeDays": 30 },
+  //     "plugins": true,
+  //     "disabledPlugins": ["example"]
+  //   }
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_DENYLIST: string[] = [
@@ -74,7 +77,34 @@ export interface MnemyxConfig {
    * ~/Desktop. Capped at MAX_REPO_ROOTS.
    */
   repoRoots: string[];
+  /**
+   * Phase 13: learning-to-rank weights. Frequency rewards commands you run
+   * often (exact-text runs); recency decays with a half-life in days.
+   * Zero weights reproduce the pre-Phase-13 order bit-for-bit.
+   */
+  ranking: RankingWeights;
+  /**
+   * Phase 13: false ignores ~/.mnemyx/plugins/ entirely. Default true.
+   */
+  plugins: boolean;
+  /**
+   * Phase 13: plugin names (default-export `name`) to skip loading.
+   * Defaults to [].
+   */
+  disabledPlugins: string[];
 }
+
+/** Phase 13 ranking weights (see `ranking` above). */
+export interface RankingWeights {
+  frequencyWeight: number;
+  recencyHalfLifeDays: number;
+}
+
+/** Built-in ranking weights: gentle blend, ties keep legacy order. */
+export const DEFAULT_RANKING: RankingWeights = {
+  frequencyWeight: 1.0,
+  recencyHalfLifeDays: 30,
+};
 
 export function getConfigPath(): string {
   return join(requireHome(), ".mnemyx", "config.json");
