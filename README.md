@@ -167,6 +167,7 @@ Notes:
 | `reindex_repos` | — | Re-scan `repoRoots` + index new commits (idempotent). Run after committing |
 | `list_sessions` | `limit?: number` (default 10, max 30), `repo_path?: string`, `only_repo?: boolean`, `gap_minutes?: number` (default 30, max 180), `since_days?: number` (max 90) | Bursts of related commands + the commits they led to, one table row per session, newest first. Splits on quiet gaps or repo switches |
 | `get_session` | `session_id: string`, `gap_minutes?: number` | Full detail for one session: timing, outcomes, commands in story order, commits |
+| `export_notes` | `kind: "session" \| "commit_story"`, `id: string`, `with_diff?: boolean` (default false) | Opt-in shareable export as redacted markdown (source header + session/story body) for PRs or wikis. Nothing leaves the machine except what you paste |
 
 All list-style outputs render as markdown tables (pipes escaped, long cells capped), graphs and diffs as fenced blocks — every terminal agent renders them natively.
 
@@ -182,6 +183,9 @@ Usage examples (as you'd prompt your assistant):
 - *"Use mnemyx get_repo_status for this repo"* → what's dirty right now.
 - *"Use mnemyx list_sessions for this repo"* → recent work bursts as a table (when, how long, outcomes, commits, top commands).
 - *"Use mnemyx get_session for s1726069200-myproj"* → that burst in full: commands in story order + the commits they led to.
+- *"Use mnemyx export_notes for that session"* → the same content as redacted markdown, ready to paste into a PR or wiki.
+
+**Sharing work.** `mnemyx export --session <id> [--out notes.md] [--force]` and `mnemyx export --commit <hash> [--with-diff]` print the same redacted markdown to stdout (pipe it to `pbcopy`, or `--out` a file — owner-only, never overwritten without `--force`). A `source: mnemyx export` header records the date and redaction count; secrets stay `[redacted]` because export reuses the already-masked display text — there is no raw path through it.
 
 **Reading tables.** History, commits, sessions, diffs, and status all render as bordered tables inside `text` fences — quote them verbatim instead of reformatting:
 
@@ -411,7 +415,7 @@ bun run src/cli.ts status   # health check against your real data
 
 ```text
 src/
-  index.ts          # MCP stdio server: import pipeline + 15 tools (history, git, errors, project, sessions)
+  index.ts          # MCP stdio server: import pipeline + 16 tools (history, git, errors, project, sessions, export)
   cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
   db.ts             # barrel: re-exports src/db/* (public API unchanged)

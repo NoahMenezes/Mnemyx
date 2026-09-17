@@ -48,6 +48,7 @@ import {
   formatSession,
   DEFAULT_SESSION_GAP_MIN,
 } from "./sessions.ts";
+import { buildSessionExport, buildStoryExport } from "./export.ts";
 import packageJson from "../package.json" with { type: "json" };
 
 // NOTE: all logging goes to stderr (console.error). stdout is owned by the
@@ -606,6 +607,54 @@ server.tool(
       gapMinutes: gap_minutes ?? DEFAULT_SESSION_GAP_MIN,
     });
     return { content: [{ type: "text" as const, text: formatSession(s) }] };
+  }
+);
+
+server.tool(
+  "export_notes",
+  "Opt-in shareable export: a session or commit story as clean redacted markdown for PRs or wikis. Same content as get_session / get_commit_story plus a source header; secrets stay masked. Nothing leaves the machine except what you paste. Results arrive preformatted — quote verbatim.",
+  {
+    kind: z
+      .enum(["session", "commit_story"])
+      .describe('What to export: "session" (a list_sessions id) or "commit_story" (a commit hash)'),
+    id: z.string().describe("Session id or commit hash (full or ≥7-char prefix)"),
+    with_diff: z
+      .boolean()
+      .optional()
+      .describe("For commit stories: append the capped diff preview (default false)"),
+  },
+  async ({ kind, id, with_diff }) => {
+    if (kind === "session") {
+      const s = getSession(id, { scanLimit: 2000 });
+      if (!s) {
+        return { content: [{ type: "text" as const, text: formatSession(null) }] };
+      }
+      const { markdown } = buildSessionExport(s.id, formatSession(s));
+      return { content: [{ type: "text" as const, text: markdown }] };
+    }
+    const commit = resolveCommit(id);
+    if (!commit) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No indexed commit matches ${JSON.stringify(id)}. The index may be stale — run reindex_repos and retry.`,
+          },
+        ],
+      };
+    }
+    const story = formatCommitStory(
+      commit,
+      getCommandsNearCommit(commit),
+      getDiffStat(commit.repoPath, commit.hash),
+      with_diff === true ? getCommitDiff(commit.repoPath, commit.hash) : null
+    );
+    const { markdown } = buildStoryExport(
+      commit.hash.slice(0, 7),
+      commit.hash,
+      story
+    );
+    return { content: [{ type: "text" as const, text: markdown }] };
   }
 );
 
