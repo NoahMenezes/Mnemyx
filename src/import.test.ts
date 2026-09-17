@@ -12,11 +12,15 @@ const paths = (tag: string): { db: string; cfg: string; log: string } => ({
   cfg: join(dir, `${tag}.config.json`),
   log: join(dir, `${tag}.exit.log`),
 });
+// Hermetic plugin isolation: every runImport gets an empty temp plugins
+// dir, so a developer's real ~/.mnemyx/plugins can never leak into tests.
+const emptyPluginsDir = mkdtempSync(join(tmpdir(), "mnemyx-import-plugins-"));
 
 beforeEach(() => closeDb());
 afterAll(() => {
   closeDb();
   rmSync(dir, { recursive: true, force: true });
+  rmSync(emptyPluginsDir, { recursive: true, force: true });
 });
 
 function mk(command: string, timestamp: number): HistoryEntry {
@@ -61,10 +65,11 @@ test("runImport wires parse+filter+exit codes on explicit paths", async () => {
     mk("deploy fresh", NOW),
     mk("deploy ancient", NOW - 400 * 86400),
   ];
-  const r = runImport({
+  const r = await runImport({
     dbPath: p.db,
     configPath: p.cfg,
     exitLogPath: p.log,
+    pluginsDir: emptyPluginsDir,
     entries,
     nowSec: NOW,
   });
@@ -77,10 +82,11 @@ test("runImport wires parse+filter+exit codes on explicit paths", async () => {
   const [hit] = searchCommands("deploy fresh", 5);
   expect(hit?.exitCode).toBe(0);
   // Idempotent rerun: nothing new, no-op exit stamping.
-  const r2 = runImport({
+  const r2 = await runImport({
     dbPath: p.db,
     configPath: p.cfg,
     exitLogPath: p.log,
+    pluginsDir: emptyPluginsDir,
     entries,
     nowSec: NOW,
   });
@@ -92,10 +98,11 @@ test("runImport with exitCodes:false ignores the log entirely", async () => {
   const p = paths("off");
   await Bun.write(p.cfg, JSON.stringify({ exitCodes: false }));
   await Bun.write(p.log, '{"ts": 1, "exit": 0, "cmd": "deploy x"}\n');
-  const r = runImport({
+  const r = await runImport({
     dbPath: p.db,
     configPath: p.cfg,
     exitLogPath: p.log,
+    pluginsDir: emptyPluginsDir,
     entries: [mk("deploy x", NOW)],
     nowSec: NOW,
   });

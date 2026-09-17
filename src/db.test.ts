@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -14,8 +14,12 @@ import {
   sortByOutcomeTier,
   normalizeScopeRepo,
   partitionRepoFirst,
+  countCommandRuns,
   getProjectProfile,
   formatProjectProfile,
+  resolveBlend,
+  blendActive,
+  blendScore,
   getEmbeddingBatch,
   getEmbeddingCandidates,
   storeEmbeddings,
@@ -712,4 +716,81 @@ test("exitBadge and shortDateTime shape table cells", () => {
   expect(exitBadge(null)).toBe("—");
   expect(shortDateTime(0)).toBe("01-01 00:00");
   expect(shortDateTime(0, true)).toBe("01-01 00:00~");
+});
+
+// ---------------------------------------------------------------------------
+// Phase 13: learning-to-rank blend. Same-length commands force FTS rank
+// ties, so the blend alone decides — frequency and recency isolate cleanly.
+// Weights come from pinned temp configs (never ambient state).
+// ---------------------------------------------------------------------------
+
+function rankCfg(weights: unknown): string {
+  const p = join(dir, `rank-cfg-${n++}.json`);
+  writeFileSync(p, JSON.stringify({ ranking: weights }));
+  return p;
+}
+
+const STD_WEIGHTS = { frequencyWeight: 1.0, recencyWeight: 1.0, recencyHalfLifeDays: 30 };
+const ZERO_WEIGHTS = { frequencyWeight: 0, recencyWeight: 0, recencyHalfLifeDays: 30 };
+
+test("blendScore: frequency saturates at 10, recency decays, zeros inert", () => {
+  const b = resolveBlend(rankCfg(STD_WEIGHTS), 10_000);
+  expect(blendActive(b)).toBe(true);
+  expect(blendScore(5, 9_000, b)).toBeGreaterThan(blendScore(1, 9_000, b));
+  // Saturation: 10 runs == 500 runs.
+  expect(blendScore(10, 9_000, b)).toBe(blendScore(500, 9_000, b));
+  // Decay: same runs, older timestamp scores lower.
+  expect(blendScore(1, 9_000, b)).toBeGreaterThan(blendScore(1, 1_000, b));
+  const z = resolveBlend(rankCfg(ZERO_WEIGHTS), 10_000);
+  expect(blendActive(z)).toBe(false);
+  expect(blendScore(99, 1, z)).toBe(0);
+});
+
+test("resolveBlend coerces config, malformed falls back per-field", () => {
+  const partial = resolveBlend(rankCfg({ frequencyWeight: 2 }), 0);
+  expect(partial.frequencyWeight).toBe(2);
+  expect(partial.recencyWeight).toBe(1.0);
+  const bad = resolveBlend(rankCfg({ frequencyWeight: "lots", recencyHalfLifeDays: -5 }), 0);
+  expect(bad.frequencyWeight).toBe(1.0);
+  expect(bad.recencyHalfLifeDays).toBe(30);
+});
+
+test("searchCommands: habitual command outranks rare twin at equal relevance", () => {
+  initDb(dbPath());
+  const cfg = rankCfg(STD_WEIGHTS);
+  const rows = [];
+  for (let i = 0; i < 5; i++) rows.push(entry("deploy alpha x", 1000));
+  rows.push(entry("deploy beta x", 1000));
+  bulkInsert(rows);
+  const got = searchCommands("deploy", { configPath: cfg, nowSec: 2000 }).map((r) => r.command);
+  expect(got[0]).toBe("deploy alpha x");
+  expect(got).toContain("deploy beta x");
+});
+
+test("searchCommands: newer twin outranks older at equal runs", () => {
+  initDb(dbPath());
+  const cfg = rankCfg(STD_WEIGHTS);
+  bulkInsert([entry("deploy alpha y", 1000), entry("deploy beta y", 2000)]);
+  const got = searchCommands("deploy", { configPath: cfg, nowSec: 3000 }).map((r) => r.command);
+  expect(got).toEqual(["deploy beta y", "deploy alpha y"]);
+});
+
+test("searchCommands: zero weights keep full recall with deterministic order", () => {
+  initDb(dbPath());
+  const cfg = rankCfg(ZERO_WEIGHTS);
+  bulkInsert([entry("deploy alpha z", 1000), entry("deploy beta z", 1000)]);
+  const a = searchCommands("deploy", { configPath: cfg, nowSec: 2000 }).map((r) => r.command);
+  const b = searchCommands("deploy", { configPath: cfg, nowSec: 2000 }).map((r) => r.command);
+  expect(a.sort()).toEqual(["deploy alpha z", "deploy beta z"]);
+  expect(a).toEqual(b);
+});
+
+test("countCommandRuns counts exact texts, chunked", () => {
+  initDb(dbPath());
+  bulkInsert([entry("run one", 1), entry("run one", 2), entry("run two", 3)]);
+  const m = countCommandRuns(["run one", "run two", "ghost"]);
+  expect(m.get("run one")).toBe(2);
+  expect(m.get("run two")).toBe(1);
+  expect(m.has("ghost")).toBe(false);
+  expect(countCommandRuns([]).size).toBe(0);
 });

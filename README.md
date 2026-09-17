@@ -374,7 +374,10 @@ history tools unaffected, no stderr → error tools report empty, never crash.
   "exitCodes": true,
   "maxHistoryAgeDays": 365,
   "redactPatterns": ["mycompany-internal-\\d+"],
-  "repoRoots": ["~/dev", "~/projects"]
+  "repoRoots": ["~/dev", "~/projects"],
+  "ranking": { "frequencyWeight": 1.0, "recencyWeight": 1.0, "recencyHalfLifeDays": 30 },
+  "plugins": true,
+  "disabledPlugins": []
 }
 ```
 
@@ -386,6 +389,9 @@ history tools unaffected, no stderr → error tools report empty, never crash.
 | `maxHistoryAgeDays` | `null` (unlimited) | Only index commands newer than N days; never deletes existing rows |
 | `redactPatterns` | `[]` | Extra secret regexes for output masking; invalid ones warn and skip |
 | `repoRoots` | `~/dev, ~/projects, ~/code, ~/Desktop` | Roots scanned for git repos (Phase 6). *Replaces* defaults; `~`/relative expand under `$HOME`; missing dirs skipped |
+| `ranking` | `{frequencyWeight: 1, recencyWeight: 1, recencyHalfLifeDays: 30}` | Learning-to-rank blend (Phase 13): habitual + recent commands rank above stale one-offs within equal outcome tiers. `0` weights = legacy order; malformed fields fall back one by one |
+| `plugins` | `true` | `false` = ignore `~/.mnemyx/plugins/` entirely |
+| `disabledPlugins` | `[]` | Plugin names to skip (see `PLUGINS.md`) |
 
 `mnemyx status` prints the effective configuration plus DB/hook/model health without changing anything.
 
@@ -411,7 +417,7 @@ history tools unaffected, no stderr → error tools report empty, never crash.
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 151 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
+bun test             # 182 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
@@ -451,7 +457,7 @@ src/
     connection.ts   #   handle lifecycle, busy-retry, limits
     paths.ts        #   per-user DB path resolution
     schema.ts       #   tables, migrations, FTS5 index, vector/commit stores
-    scope.ts        #   query primitives (LIKE/FTS/rank/repo scope)
+    scope.ts        #   query primitives (LIKE/FTS/rank/repo scope, Phase 13 blend)
     commands.ts     #   history writes, keyword search, recents, exit stamping
     vectors.ts      #   Phase 4 embedding BLOB store
     commits.ts      #   Phase 6 commit store + queries
@@ -468,6 +474,7 @@ src/
                     # + graph / unified diff / status / file-history passthroughs (all masked)
   correlate.ts      # Phase 6: time-window stories (same-repo first) + line explanations
   sessions.ts       # Phase 9: on-demand burst clustering (list/get) + table rendering
+  plugins.ts        # Phase 13: ~/.mnemyx/plugins loader + psql reference (see PLUGINS.md)
   redact.ts         # secrets redaction for tool output (store raw, display masked)
   hook.ts           # shell-hook snippets (v2: exit+cwd+repo) + consent-gated installer/upgrader
   *.test.ts         # hermetic suite: bun test (temp DBs, fixture strings, stub model)

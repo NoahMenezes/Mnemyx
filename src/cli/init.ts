@@ -156,10 +156,15 @@ export async function cmdInit(rawArgs: string[]): Promise<number> {
 
     // 2. Import.
     console.log(`[2/4] Indexing shell history (idempotent — safe to re-run)…`);
-    const result = runImport();
+    const result = await runImport();
     console.log(
       `      parsed ${result.parsed} commands, ${result.added} new, ${result.ageFilteredOut} skipped by age filter`
     );
+    if (result.pluginsLoaded.length > 0 || result.pluginsSkipped > 0) {
+      console.log(
+        `      plugins: ${result.pluginsLoaded.length > 0 ? result.pluginsLoaded.join(", ") : "none loaded"}${result.pluginsSkipped > 0 ? `, ${result.pluginsSkipped} skipped (see warnings above)` : ""}`
+      );
+    }
     if (result.exitCodesEnabled && result.exitOutcomes > 0) {
       console.log(
         `      exit codes: ${result.exitUpdated} rows annotated from ${result.exitOutcomes} logged commands`

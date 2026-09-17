@@ -3,6 +3,21 @@
 All notable changes to Mnemyx. Versions follow semantic versioning.
 The full history lives in git; this file is the narrative layer.
 
+## Unreleased
+
+- **Learning-to-rank (Phase 13)** — habitual + recent commands rank
+  above stale one-offs within equal outcome tiers, on both keyword and
+  semantic paths. Tunable via `ranking` in config; zero weights restore
+  the legacy order exactly.
+- **Plugin sources (Phase 13)** — `~/.mnemyx/plugins/*.mjs` files feed
+  extra local history (psql reference included) through the same
+  pipeline. Bad plugins skip with a warning, never break imports.
+  See `PLUGINS.md`.
+- **Export (Phase 11)**, **sessions (Phase 9)**, **project scoping
+  (Phase 7)** — see README Tools.
+- **Bordered tables everywhere** — all list outputs render as bordered
+  Unicode tables in `text` fences, quoted verbatim by agents.
+
 ## 0.1.0 — First public release
 
 Local-first MCP server: searchable memory of your real shell history.

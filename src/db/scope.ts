@@ -4,6 +4,8 @@
 // repo scoping. Pure functions — no DB access.
 // ---------------------------------------------------------------------------
 
+import { loadConfig, DEFAULT_RANKING } from "../config.ts";
+
 // Hardening: bound the work any single query can trigger. FTS already caps
 // at 10 tokens and the embedder would happily chew megabytes, so overlong
 // queries are rejected up front (both search paths share this).
@@ -89,4 +91,71 @@ export function partitionRepoFirst<T extends { repo: string | null }>(
     else rest.push(r);
   }
   return [...same, ...rest];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13: learning-to-rank blend (frequency + recency). Both signals
+// already live in `commands` (every run is a row with a timestamp), so no
+// schema change and nothing new to track.
+//
+// Placement: AFTER repo-boost and outcome-tier, BEFORE rank/timestamp —
+// the blend reorders within equal (repo, outcome) groups but never
+// promotes a failure above a success. All terms are plain arithmetic
+// (deliberately no LN/EXP: bun:sqlite builds vary in math-function
+// support, and bounded terms can't swamp relevance anyway):
+//   frequency: fw * MIN(runs,10)/10          ∈ [0, fw]
+//   recency:   rw * 1/(1+ageDays/halfLife)   ∈ (0, rw]
+// Zero weights skip the JOIN entirely and emit the legacy SQL verbatim,
+// so the escape hatch is byte-identical to pre-Phase-13 behavior.
+// ---------------------------------------------------------------------------
+
+export interface BlendParams {
+  frequencyWeight: number;
+  recencyWeight: number;
+  recencyHalfLifeDays: number;
+  /** Reference "now" (unix sec) — injectable for tests. */
+  nowSec: number;
+}
+
+/** Coerced blend params from config (fresh read per call, like denylist). */
+export function resolveBlend(configPath?: string, nowSec?: number): BlendParams {
+  const w = configPath !== undefined
+    ? loadConfig(configPath).ranking
+    : loadConfig().ranking;
+  const frequencyWeight =
+    typeof w.frequencyWeight === "number" && Number.isFinite(w.frequencyWeight)
+      ? Math.max(0, w.frequencyWeight)
+      : DEFAULT_RANKING.frequencyWeight;
+  const recencyWeight =
+    typeof w.recencyWeight === "number" && Number.isFinite(w.recencyWeight)
+      ? Math.max(0, w.recencyWeight)
+      : DEFAULT_RANKING.recencyWeight;
+  const recencyHalfLifeDays =
+    typeof w.recencyHalfLifeDays === "number" && Number.isFinite(w.recencyHalfLifeDays)
+      ? Math.max(1, w.recencyHalfLifeDays)
+      : DEFAULT_RANKING.recencyHalfLifeDays;
+  const now =
+    nowSec !== undefined && Number.isFinite(nowSec) ? Math.floor(nowSec) : Math.floor(Date.now() / 1000);
+  return { frequencyWeight, recencyWeight, recencyHalfLifeDays, nowSec: now };
+}
+
+export function blendActive(b: BlendParams): boolean {
+  return b.frequencyWeight > 0 || b.recencyWeight > 0;
+}
+
+/** LEFT JOIN run-counts per exact command text (one row per distinct command). */
+export function blendJoin(alias: string): string {
+  return `LEFT JOIN (SELECT command AS _fc, COUNT(*) AS _runs FROM commands GROUP BY command) _f ON _f._fc = ${alias}.command`;
+}
+
+/** DESC fragment: higher blend = more habitual + more recent. */
+export function blendOrder(alias: string, b: BlendParams): string {
+  return `((${b.frequencyWeight} * MIN(COALESCE(_f._runs, 0), 10) / 10.0) + (${b.recencyWeight} * (1.0 / (1.0 + (${b.nowSec} - ${alias}.timestamp) / 86400.0 / ${b.recencyHalfLifeDays})))) DESC`;
+}
+
+/** JS-side twin of the SQL blend (semantic path scores in JS, not SQL). */
+export function blendScore(runs: number, timestamp: number, b: BlendParams): number {
+  const freq = b.frequencyWeight * Math.min(Math.max(0, runs), 10) / 10;
+  const ageDays = Math.max(0, (b.nowSec - timestamp) / 86400);
+  return freq + b.recencyWeight * (1 / (1 + ageDays / b.recencyHalfLifeDays));
 }

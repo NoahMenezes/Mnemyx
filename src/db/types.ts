@@ -85,10 +85,19 @@ export interface SearchOptions {
    * are excluded, like onlySuccessful excludes unknowns. Default false.
    */
   onlyRepo?: boolean;
+  /**
+   * Phase 13: reference "now" (unix sec) for the recency blend.
+   * Injectable for tests; defaults to wall clock.
+   */
+  nowSec?: number;
+  /**
+   * Phase 13: override config path for ranking weights (tests pin
+   * weights deterministically; production omits it for ambient config).
+   */
+  configPath?: string;
 }
 
-export interface RecentOptions {
-  limit?: number;
+export interface RecentOptions {  limit?: number;
   repo?: string | null;
   onlyRepo?: boolean;
 }

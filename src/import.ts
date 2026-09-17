@@ -7,17 +7,25 @@ import {
 import { parseAllAvailableHistory } from "./historyParser.ts";
 import { parseExitLog } from "./exitLog.ts";
 import { loadConfig } from "./config.ts";
+import { loadPluginEntries } from "./plugins.ts";
 
 // ---------------------------------------------------------------------------
 // Phase 5: the one import pipeline, shared by the MCP server (index.ts) and
 // the setup CLI (cli.ts) so both can never drift apart.
-// Steps: open DB (+migrations) -> parse histories -> age filter ->
-// bulk insert -> stamp exit codes. All steps idempotent.
+// Steps: open DB (+migrations) -> parse histories -> load plugins ->
+// age filter -> bulk insert -> stamp exit codes. All steps idempotent.
+// Async since Phase 13: plugin parse() functions may be async.
 // ---------------------------------------------------------------------------
 
 export interface ImportResult {
   /** Entries parsed from history files (post dedupe, pre age-filter). */
   parsed: number;
+  /** Plugin entries accepted (pre age-filter). */
+  pluginEntries: number;
+  /** Plugin names loaded this run. */
+  pluginsLoaded: string[];
+  /** Plugin files skipped (see stderr for reasons). */
+  pluginsSkipped: number;
   /** Entries dropped by maxHistoryAgeDays (0 when unlimited). */
   ageFilteredOut: number;
   /** Rows newly inserted (re-runs insert only genuinely new commands). */
@@ -55,18 +63,33 @@ export interface ImportOptions {
   configPath?: string;
   /** Override exit-code log path (default: ~/.mnemyx/exit-codes.log). */
   exitLogPath?: string;
+  /** Override plugin dir (default: ~/.mnemyx/plugins). Tests use temp dirs. */
+  pluginsDir?: string;
   /** Pre-parsed entries, bypassing history-file parsing (tests). */
   entries?: HistoryEntry[];
   /** Injected clock for the age filter (tests). Unix seconds. */
   nowSec?: number;
 }
 
-export function runImport(opts: ImportOptions = {}): ImportResult {
+export async function runImport(opts: ImportOptions = {}): Promise<ImportResult> {
   if (opts.dbPath !== undefined) initDb(opts.dbPath);
   else initDb();
   const cfg = loadConfig(opts.configPath);
   const parsed = opts.entries ?? parseAllAvailableHistory();
-  const entries = filterByMaxAge(parsed, cfg.maxHistoryAgeDays, opts.nowSec);
+  // Phase 13: plugin rows join the same pipeline (same age filter,
+  // same idempotent insert, same exit stamping). A bad plugin can only
+  // reduce to zero rows — never break built-in imports.
+  let pluginEntries: HistoryEntry[] = [];
+  let pluginsLoaded: string[] = [];
+  let pluginsSkipped = 0;
+  if (cfg.plugins) {
+    const plugins = await loadPluginEntries(opts.pluginsDir, cfg.disabledPlugins);
+    pluginEntries = plugins.entries;
+    pluginsLoaded = plugins.loaded;
+    pluginsSkipped = plugins.skipped.length;
+  }
+  const all = [...parsed, ...pluginEntries];
+  const entries = filterByMaxAge(all, cfg.maxHistoryAgeDays, opts.nowSec);
   const added = bulkInsert(entries);
   let exitOutcomes = 0;
   let exitUpdated = 0;
@@ -79,7 +102,10 @@ export function runImport(opts: ImportOptions = {}): ImportResult {
   }
   return {
     parsed: parsed.length,
-    ageFilteredOut: parsed.length - entries.length,
+    pluginEntries: pluginEntries.length,
+    pluginsLoaded,
+    pluginsSkipped,
+    ageFilteredOut: all.length - entries.length,
     added,
     exitOutcomes,
     exitUpdated,

@@ -171,3 +171,48 @@ test("repoRoots capped at MAX_REPO_ROOTS", async () => {
     await Bun.$`rm -f ${p}`.quiet();
   }
 });
+
+test("ranking weights parse, partial allowed, malformed falls back", async () => {
+  const p = `/tmp/mnemyx-cfg-${process.pid}-ranking.json`;
+  await Bun.write(
+    p,
+    JSON.stringify({ ranking: { frequencyWeight: 2, recencyHalfLifeDays: 7 } })
+  );
+  try {
+    const full = loadConfig(p);
+    expect(full.ranking).toEqual({ frequencyWeight: 2, recencyWeight: 1.0, recencyHalfLifeDays: 7 });
+  } finally {
+    await Bun.$`rm -f ${p}`.quiet();
+  }
+  const q = `/tmp/mnemyx-cfg-${process.pid}-ranking-bad.json`;
+  await Bun.write(q, JSON.stringify({ ranking: { frequencyWeight: "lots", recencyWeight: -1 } }));
+  try {
+    const bad = loadConfig(q);
+    expect(bad.ranking.frequencyWeight).toBe(1.0);
+    expect(bad.ranking.recencyWeight).toBe(1.0);
+    expect(bad.ranking.recencyHalfLifeDays).toBe(30);
+  } finally {
+    await Bun.$`rm -f ${q}`.quiet();
+  }
+});
+
+test("plugins flags parse, malformed falls back", async () => {
+  const p = `/tmp/mnemyx-cfg-${process.pid}-plugins.json`;
+  await Bun.write(p, JSON.stringify({ plugins: false, disabledPlugins: ["a", "", 42] }));
+  try {
+    const cfg = loadConfig(p);
+    expect(cfg.plugins).toBe(false);
+    expect(cfg.disabledPlugins).toEqual(["a"]);
+  } finally {
+    await Bun.$`rm -f ${p}`.quiet();
+  }
+  const q = `/tmp/mnemyx-cfg-${process.pid}-plugins-bad.json`;
+  await Bun.write(q, JSON.stringify({ plugins: "yes", disabledPlugins: "nope" }));
+  try {
+    const bad = loadConfig(q);
+    expect(bad.plugins).toBe(true);
+    expect(bad.disabledPlugins).toEqual([]);
+  } finally {
+    await Bun.$`rm -f ${q}`.quiet();
+  }
+});

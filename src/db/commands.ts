@@ -22,6 +22,10 @@ import {
   fetchSize,
   normalizeScopeRepo,
   outcomeTier,
+  resolveBlend,
+  blendActive,
+  blendJoin,
+  blendOrder,
 } from "./scope.ts";
 import { loadConfig, firstToken } from "../config.ts";
 import { redactSecrets } from "../redact.ts";
@@ -124,6 +128,10 @@ export function searchCommands(
   const scopeRepo = normalizeScopeRepo(opts.repo ?? null);
   const strictRepo = opts.onlyRepo === true && scopeRepo !== null;
   const boostRepo = !strictRepo ? scopeRepo : null;
+  // Phase 13: habitual + recent commands rank above stale one-offs within
+  // equal (repo, outcome) groups. Zero weights emit the legacy SQL.
+  const blend = resolveBlend(opts.configPath, opts.nowSec);
+  const useBlend = blendActive(blend);
   const match = buildFtsMatch(trimmed);
   let rows: DbRow[];
   if (match === null) {
@@ -131,10 +139,11 @@ export function searchCommands(
       .query(
         `SELECT ${COMMAND_COLS}
          FROM commands
+         ${useBlend ? blendJoin("commands") : ""}
          WHERE command LIKE '%' || ? || '%' ESCAPE '\\'
            ${successFilter ? "AND exit_code = 0" : ""}
            ${strictRepo ? "AND repo = ?" : ""}
-         ORDER BY ${boostRepo !== null ? "CASE WHEN repo = ? THEN 0 ELSE 1 END," : ""} ${outcomeTier("commands")}, timestamp DESC
+         ORDER BY ${boostRepo !== null ? "CASE WHEN repo = ? THEN 0 ELSE 1 END," : ""} ${outcomeTier("commands")}, ${useBlend ? `${blendOrder("commands", blend)},` : ""} timestamp DESC
          LIMIT ?`
       )
       .all(
@@ -149,10 +158,11 @@ export function searchCommands(
       .query(
         `SELECT ${COMMAND_COLS_ALIASED}
          FROM commands_fts f JOIN commands c ON c.id = f.rowid
+         ${useBlend ? blendJoin("c") : ""}
          WHERE commands_fts MATCH ?
            ${successFilter ? "AND c.exit_code = 0" : ""}
            ${strictRepo ? "AND c.repo = ?" : ""}
-         ORDER BY ${boostRepo !== null ? "CASE WHEN c.repo = ? THEN 0 ELSE 1 END," : ""} ${outcomeTier("c")}, rank
+         ORDER BY ${boostRepo !== null ? "CASE WHEN c.repo = ? THEN 0 ELSE 1 END," : ""} ${outcomeTier("c")}, ${useBlend ? `${blendOrder("c", blend)},` : ""} rank
          LIMIT ?`
       )
       .all(
@@ -248,6 +258,25 @@ export function getCommandsByIds(ids: number[]): CommandRow[] {
       )
       .all(...chunk) as DbRow[];
     out.push(...rows.map(rowToEntry));
+  }
+  return out;
+}
+
+// Phase 13: run counts per exact command text — the frequency signal.
+// Chunked IN-list like getCommandsByIds; missing texts read back as 0
+// (callers default via `?? 0`, so partial maps are safe).
+export function countCommandRuns(commands: string[]): Map<string, number> {
+  const out = new Map<string, number>();
+  const uniq = [...new Set(commands)];
+  for (let i = 0; i < uniq.length; i += 500) {
+    const chunk = uniq.slice(i, i + 500);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = getDb()
+      .query(
+        `SELECT command, COUNT(*) AS n FROM commands WHERE command IN (${placeholders}) GROUP BY command`
+      )
+      .all(...chunk) as { command: string; n: number }[];
+    for (const r of rows) out.set(r.command, r.n);
   }
   return out;
 }

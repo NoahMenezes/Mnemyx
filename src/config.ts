@@ -20,7 +20,7 @@ import { join, isAbsolute, normalize } from "node:path";
   //     "maxHistoryAgeDays": 365,
   //     "redactPatterns": ["mycompany-internal-\\d+"],
   //     "repoRoots": ["~/dev", "~/projects"],
-  //     "ranking": { "frequencyWeight": 1.0, "recencyHalfLifeDays": 30 },
+  //     "ranking": { "frequencyWeight": 1.0, "recencyWeight": 1.0, "recencyHalfLifeDays": 30 },
   //     "plugins": true,
   //     "disabledPlugins": ["example"]
   //   }
@@ -97,12 +97,14 @@ export interface MnemyxConfig {
 /** Phase 13 ranking weights (see `ranking` above). */
 export interface RankingWeights {
   frequencyWeight: number;
+  recencyWeight: number;
   recencyHalfLifeDays: number;
 }
 
 /** Built-in ranking weights: gentle blend, ties keep legacy order. */
 export const DEFAULT_RANKING: RankingWeights = {
   frequencyWeight: 1.0,
+  recencyWeight: 1.0,
   recencyHalfLifeDays: 30,
 };
 
@@ -169,6 +171,9 @@ export function loadConfig(
   let maxHistoryAgeDays: number | null = null;
   const redactPatterns: string[] = [];
   let repoRoots: string[] | null = null;
+  let ranking: RankingWeights = { ...DEFAULT_RANKING };
+  let plugins = true;
+  const disabledPlugins: string[] = [];
   if (existsSync(configPath)) {
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
@@ -178,6 +183,9 @@ export function loadConfig(
         maxHistoryAgeDays?: unknown;
         redactPatterns?: unknown;
         repoRoots?: unknown;
+        ranking?: unknown;
+        plugins?: unknown;
+        disabledPlugins?: unknown;
       };
       if (Array.isArray(raw.denylist)) {
         for (const item of raw.denylist) {
@@ -263,6 +271,54 @@ export function loadConfig(
           `[mnemyx] ignoring malformed "repoRoots" in ${configPath} (expected array of path strings)`
         );
       }
+      if (raw.ranking !== undefined && raw.ranking !== null) {
+        // Partial objects allowed: each weight validated independently,
+        // malformed fields fall back one by one (never all-or-nothing).
+        const r = raw.ranking as { frequencyWeight?: unknown; recencyWeight?: unknown; recencyHalfLifeDays?: unknown };
+        const next = { ...DEFAULT_RANKING };
+        if (typeof r.frequencyWeight === "number" && Number.isFinite(r.frequencyWeight) && r.frequencyWeight >= 0) {
+          next.frequencyWeight = r.frequencyWeight;
+        } else if (r.frequencyWeight !== undefined) {
+          console.error(
+            `[mnemyx] ignoring malformed "ranking.frequencyWeight" in ${configPath} (expected non-negative number)`
+          );
+        }
+        if (typeof r.recencyWeight === "number" && Number.isFinite(r.recencyWeight) && r.recencyWeight >= 0) {
+          next.recencyWeight = r.recencyWeight;
+        } else if (r.recencyWeight !== undefined) {
+          console.error(
+            `[mnemyx] ignoring malformed "ranking.recencyWeight" in ${configPath} (expected non-negative number)`
+          );
+        }
+        if (typeof r.recencyHalfLifeDays === "number" && Number.isFinite(r.recencyHalfLifeDays) && r.recencyHalfLifeDays > 0) {
+          next.recencyHalfLifeDays = r.recencyHalfLifeDays;
+        } else if (r.recencyHalfLifeDays !== undefined) {
+          console.error(
+            `[mnemyx] ignoring malformed "ranking.recencyHalfLifeDays" in ${configPath} (expected positive number)`
+          );
+        }
+        ranking = next;
+      } else if (raw.ranking !== undefined) {
+        console.error(
+          `[mnemyx] ignoring malformed "ranking" in ${configPath} (expected object with frequencyWeight/recencyWeight/recencyHalfLifeDays)`
+        );
+      }
+      if (typeof raw.plugins === "boolean") {
+        plugins = raw.plugins;
+      } else if (raw.plugins !== undefined) {
+        console.error(
+          `[mnemyx] ignoring malformed "plugins" in ${configPath} (expected boolean)`
+        );
+      }
+      if (Array.isArray(raw.disabledPlugins)) {
+        for (const item of raw.disabledPlugins) {
+          if (typeof item === "string" && item.trim()) disabledPlugins.push(item.trim());
+        }
+      } else if (raw.disabledPlugins !== undefined) {
+        console.error(
+          `[mnemyx] ignoring malformed "disabledPlugins" in ${configPath} (expected array of strings)`
+        );
+      }
     } catch (err) {
       console.error(
         `[mnemyx] ignoring unreadable config at ${configPath}: ${err instanceof Error ? err.message : String(err)}`
@@ -278,7 +334,7 @@ export function loadConfig(
       repoRoots = [];
     }
   }
-  return { denylist: [...denied], embeddings, exitCodes, maxHistoryAgeDays, redactPatterns, repoRoots };
+  return { denylist: [...denied], embeddings, exitCodes, maxHistoryAgeDays, redactPatterns, repoRoots, ranking, plugins, disabledPlugins };
 }
 
 // First whitespace-separated token, lowercased — the "command name".

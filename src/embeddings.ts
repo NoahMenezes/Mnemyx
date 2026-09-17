@@ -8,6 +8,7 @@ import {
   countEmbeddings,
   getEmbeddingBatch,
   getCommandsByIds,
+  countCommandRuns,
   sortByOutcomeTier,
   partitionRepoFirst,
   normalizeScopeRepo,
@@ -16,6 +17,7 @@ import {
   MAX_QUERY_LENGTH,
   type CommandRow,
 } from "./db.ts";
+import { resolveBlend, blendActive, blendScore } from "./db/scope.ts";
 import { loadConfig, firstToken } from "./config.ts";
 
 // ---------------------------------------------------------------------------
@@ -187,6 +189,16 @@ export interface SemanticOptions {
    */
   repo?: string | null;
   onlyRepo?: boolean;
+  /**
+   * Phase 13: reference "now" (unix sec) for the recency blend.
+   * Injectable for tests; defaults to wall clock.
+   */
+  nowSec?: number;
+  /**
+   * Phase 13: override config path for ranking weights (tests pin
+   * weights deterministically; production omits it for ambient config).
+   */
+  configPath?: string;
 }
 
 // Semantic search over stored vectors. Throws when unusable (model won't
@@ -248,7 +260,20 @@ export async function semanticSearch(
   // Phase 7: repo boost outermost, outcome tiers within each group, cosine
   // order preserved within each tier (both sorts stable). Matches the
   // keyword path's ORDER BY repo, outcome, relevance.
-  const tiered = sortByOutcomeTier(ordered);
+  // Phase 13: frequency/recency blend sits between outcome and cosine —
+  // habitual, recent commands win ties. Stable sorts applied innermost
+  // first (cosine, already ordered) → blend → outcome → repo.
+  const blend = resolveBlend(opts.configPath, opts.nowSec);
+  let ranked = ordered;
+  if (blendActive(blend)) {
+    const runs = countCommandRuns(ranked.map((r) => r.command));
+    ranked = [...ranked].sort(
+      (a, b) =>
+        blendScore(runs.get(b.command) ?? 0, b.timestamp, blend) -
+        blendScore(runs.get(a.command) ?? 0, a.timestamp, blend)
+    );
+  }
+  const tiered = sortByOutcomeTier(ranked);
   const scoped = partitionRepoFirst(tiered, boostRepo);
   return applyDenylist(scoped, wanted);
 }

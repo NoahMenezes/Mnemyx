@@ -30,7 +30,7 @@ registerActivityTools(server);
 
 async function main(): Promise<void> {
   // Shared import pipeline (same code the `mnemyx init` CLI runs).
-  const result = runImport();
+  const result = await runImport();
   console.error(
     `[mnemyx] import complete: ${result.added} new, ${result.parsed - result.added} already indexed`
   );

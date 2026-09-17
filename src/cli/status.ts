@@ -2,7 +2,7 @@
 // `mnemyx status`: read-only health report (changes nothing).
 // ---------------------------------------------------------------------------
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { getHistoryFilePaths } from "../historyParser.ts";
@@ -12,6 +12,7 @@ import { hookInstalled } from "../hook.ts";
 import { EMBEDDING_MODEL_ID, getModelCacheDir } from "../embeddings.ts";
 import { getDefaultDbPath } from "../db.ts";
 import { discoverReposFromConfig } from "../repoScanner.ts";
+import { getPluginsDir } from "../plugins.ts";
 import { VERSION, home } from "./shared.ts";
 
 export interface StatusInfo {
@@ -27,6 +28,8 @@ export interface StatusInfo {
   hookRcFiles: string[];
   exitLogPath: string;
   exitLogLines: number;
+  pluginsDir: string;
+  pluginFiles: number;
 }
 
 export function collectStatus(): StatusInfo {
@@ -98,7 +101,22 @@ export function collectStatus(): StatusInfo {
     hookRcFiles: rcs,
     exitLogPath: logPath,
     exitLogLines,
+    pluginsDir: getPluginsDir(),
+    pluginFiles: countPluginFiles(getPluginsDir()),
   };
+}
+
+// Probe only: how many loadable plugin files exist (no code is loaded —
+// status stays side-effect-free; actual validation happens at import).
+function countPluginFiles(dir: string): number {
+  if (dir === "") return 0;
+  try {
+    return readdirSync(dir).filter(
+      (f) => f.endsWith(".js") || f.endsWith(".mjs") || f.endsWith(".cjs")
+    ).length;
+  } catch {
+    return 0;
+  }
 }
 
 export function printStatus(s: StatusInfo): void {
@@ -122,4 +140,7 @@ export function printStatus(s: StatusInfo): void {
     console.log(`  ${existsSync(src.path) ? "found  " : "missing"}  ${src.path} (${src.shell})`);
   }
   console.log(`Model cache: ${getModelCacheDir()} ${existsSync(getModelCacheDir()) ? "" : "(not downloaded yet)"}`);
+  console.log(
+    `Plugins:   ${s.pluginFiles > 0 ? `${s.pluginFiles} file(s)` : "none"} (${s.pluginsDir || "no home"})${cfg.plugins ? "" : " (disabled via config)"}`
+  );
 }
