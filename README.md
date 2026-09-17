@@ -8,19 +8,21 @@ Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives
 
 Prerequisites: [Bun](https://bun.sh) ≥ 1.4 (the only runtime dependency) and `python3` (only needed for the optional exit-code hook).
 
+> Cold-install honesty: the npm package itself is tiny, but first install pulls ~550 MB of ONNX runtime binaries (multi-platform, install-time only) and the first semantic run downloads a ~23 MB model to `~/.cache/mnemyx/models` (then works offline forever). Keyword search needs none of that.
+
 ```bash
 # Option A: try it without installing (needs Bun)
 bunx mnemyx init
 
 # Option B: from source
-git clone <repo-url> && cd mnemyx
+git clone https://github.com/NoahMenezes/Mnemyx.git && cd Mnemyx
 bun install
 bun run src/cli.ts init
 ```
 
-`mnemyx init` walks you through four steps: environment check → history import (idempotent, safe to re-run) → **optional** shell-hook install (asks first, never silent) → client registration commands. Then verify:
+`mnemyx init` walks you through four steps: environment check → history import + git indexing (both idempotent, safe to re-run) → **optional** shell-hook install or v1→v2 upgrade (asks first, never silent) → client registration commands. Then verify:
 
-1. `mnemyx status` — commands indexed, FTS docs, vectors, hook state.
+1. `mnemyx status` — commands indexed, FTS docs, vectors, commits, repos, hook state.
 2. In your client: ask it to call `get_recent_commands` — you should see your real recent commands.
 3. Ask *"have I ever fixed a docker permissions error?"* — `search_history` should find it, including *why* it matches.
 
@@ -155,7 +157,7 @@ Notes:
 | `get_recent_commands` | `limit?: number` (default 10, max 100) | N most recent commands, chronological (noise filtered, outcomes annotated) |
 | `search_commits` | `query: string`, `limit?: number` (default 20, max 100) | Keyword search over indexed git commit messages + file lists, across all repos. Hits carry short hash, date, files, and `repo:` path |
 | `get_commit_context` | `commit_hash: string` (full or ≥7-char prefix) | One commit: message, date, files, repo, plus on-demand `git show --stat` |
-| `get_commit_story` | `commit_hash: string`, `window_minutes?: number` (default 30, max 180), `with_diff?: boolean` (default false) | Commit context PLUS the shell commands from the window before it — timeline of what you did, then what you committed. Time-only match (see below) |
+| `get_commit_story` | `commit_hash: string`, `window_minutes?: number` (default 30, max 180), `with_diff?: boolean` (default false) | Commit context PLUS the shell commands from the window before it — timeline of what you did, then what you committed. Same-repo commands (v2 hook) sort first; the rest are time-only. `with_diff: true` appends the diff preview |
 | `explain_line` | `repo_path: string`, `file_path: string` (relative), `line_number: number` | Flagship: `git blame` finds who touched the line, then returns that commit's story. Answers "why does this line exist" |
 | `get_repo_log` | `repo_path: string`, `limit?: number` (default 15, max 30) | ASCII commit graph (`git log --graph`): hash, date, message per line, branches drawn |
 | `get_commit_diff` | `commit_hash: string`, `repo_path?: string`, `file?: string` (repo-relative), `max_lines?: number` (default 120, max 500) | Unified diff like a review view: per-file `+added −removed`, `@@` hunks, `+`/`-` lines. Secrets masked, binaries collapsed, truncated past caps. Works even for unindexed commits |
@@ -209,6 +211,10 @@ Per-file `+added −removed` headers, `@@ -old +new @@` hunks, context lines, `-
 
 ```sh
 # zsh (~/.zshrc) — full snippet; bash version in `mnemyx init` / source
+# --- Mnemyx (optional): log each command's exit code locally for shell-history search.
+# Appends JSON lines to ~/.mnemyx/exit-codes.log. Nothing leaves your machine.
+# Remove this block to disable.
+# mnemyx-hook-version: 2
 _mnemyx_precmd() {
   local code=$?
   local cmd
@@ -277,34 +283,42 @@ Mnemyx correlates shell history with local git history, so the AI answers "what 
 ## Architecture
 
 ```text
-                    +------------------- ~/.zsh_history / ~/.bash_history
-                    |                   ~/.mnemyx/exit-codes.log (hook)
-                    v                   git repos under repoRoots
-            +-------+-------+  git log  +------+--------+
-            |  historyParser |  exitLog  | repoScanner  | gitIndexer (1 spawn/repo)
-            +-------+--------+-----------+------+-------+
-                    |                          |
-                    v                          v
-            +-------+--------+          +------+-------+
-            |  commands      |          |  commits     |   bun:sqlite (WAL)
-            |  commands_fts  |          |  (hash, msg, |
-            |  command_embs  |          |   files, ts) |
-            +---+--------+---+          +--+---+-------+
-                |        |                    |   |
-  keyword (FTS5)|        |semantic (ONNX)      |   | blame / diff / status (git CLI, on demand)
-                |        |                    |   |
-                v        v                    v   v
-            search_history  get_recent   search/get_/explain_/reindex
-            get_recent_cmds              _commits/_story/_line/_repos
-                                         + repo_log / commit_diff (review view)
-                                         + repo_status / file_history (+A −D)
-                                 |
-                                 v
-                     MCP stdio server (index.ts)
-                     CLI: init / status / bench (cli.ts)
+  sources                              indexers                          SQLite (bun:sqlite, WAL)
+  ───────                              ────────                          ─────────────────────
+  ~/.zsh_history ──┐
+                   ├─→ historyParser ──→ commands (text, ts, shell, source)
+  ~/.bash_history ─┘                          │
+                                              │  exitLog (v1/v2/v3 lines)
+  interactive hook (precmd) ── exit+cwd+repo ─┤
+  mnemyx run -- <cmd> ────── exit+stderr ─────┤
+                                              ↓
+                                     commands.exit_code / .cwd / .repo
+                                     commands.stderr_snippet (redacted) / .stderr_fp
+  git repos ──→ repoScanner ──→ gitIndexer ──→ commits (hash, msg, files, ts)
+                (depth 3)       (1 git log spawn per repo)
+
+  commands ──→ commands_fts (triggers)      ║  query paths
+  commands ──→ command_embeddings (ONNX) ─→ ║  ═══════════
+                                             ║  keyword FTS5 ········→ search_history ─┐
+                                             ║  semantic top-K stream ·→ (auto/semantic│
+                                             ║  error fp LIKE ·······→  +backfill) ───┤
+                                             ║  error fp exact-first → search_by_error ┤
+                                             ║  recency ·············→ get_recent_cmds ┤
+  commits ───→ LIKE search ··················→ search_commits ─────────────────────────┤
+  git CLI on demand (stat/diff/blame/ ──────→ get_commit_context / _story / _diff ────┤
+    graph/status/log --follow)             explain_line / repo_log / ─────────────────┤
+                                           repo_status / file_history                  │
+  discover+index ··························→ reindex_repos ───────────────────────────┤
+                                                                                       ↓
+                                                              MCP stdio server (index.ts)
+                                              CLI: init / status / bench / run (cli.ts)
 ```
 
-Data flows one way (files → SQLite → tools); secrets are masked at the single choke point `formatRows()` / `sanitizeForDisplay`. Every stage degrades: no hook → unknown exits, no model → keyword, no repos → history tools unaffected.
+Labels: `──→` stored (SQLite), `····→` computed on demand (git CLI / in-memory).
+Secrets: commands masked at display (`formatRows`); git output masked per call
+(`redactGitOutput`); stderr redacted *before* storage (import transaction).
+Every stage degrades: no hook → unknown exits, no model → keyword, no repos →
+history tools unaffected, no stderr → error tools report empty, never crash.
 
 ## Configuration
 
@@ -354,7 +368,7 @@ Data flows one way (files → SQLite → tools); secrets are masked at the singl
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 128 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
+bun test             # 129 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
@@ -368,7 +382,7 @@ bun run src/cli.ts status   # health check against your real data
 
 ```text
 src/
-  index.ts          # MCP stdio server: import pipeline + 7 tools (history + git)
+  index.ts          # MCP stdio server: import pipeline + 12 tools (history, git, errors)
   cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
   db.ts             # bun:sqlite schema + migrations, FTS5 index, vector store, ranked search, commits
@@ -380,9 +394,9 @@ src/
   repoScanner.ts    # Phase 6: discover git repos under repoRoots (depth-capped, never throws)
   gitIndexer.ts     # Phase 6: one-spawn-per-repo git log index + on-demand diff stat + blame
                     # + graph / unified diff / status / file-history passthroughs (all masked)
-  correlate.ts      # Phase 6: time-window stories + line explanations (time-only caveat)
+  correlate.ts      # Phase 6: time-window stories (same-repo first) + line explanations
   redact.ts         # secrets redaction for tool output (store raw, display masked)
-  hook.ts           # shell-hook snippets + consent-gated installer
+  hook.ts           # shell-hook snippets (v2: exit+cwd+repo) + consent-gated installer/upgrader
   *.test.ts         # hermetic suite: bun test (temp DBs, fixture strings, stub model)
 ```
 

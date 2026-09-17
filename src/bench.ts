@@ -6,7 +6,11 @@ import {
   closeDb,
   bulkInsert,
   searchCommands,
+  bulkInsertCommits,
+  searchCommits,
+  searchByError,
   type HistoryEntry,
+  type NewCommit,
 } from "./db.ts";
 
 // ---------------------------------------------------------------------------
@@ -29,6 +33,10 @@ export interface BenchResult {
   semanticP50: number | null;
   semanticP95: number | null;
   semanticNote: string;
+  gitP50: number;
+  gitP95: number;
+  errorP50: number;
+  errorP95: number;
   rssMB: number;
 }
 
@@ -120,6 +128,34 @@ export async function runBench(opts: BenchOptions = {}): Promise<BenchResult> {
     }
     ftsTimes.sort((a, b) => a - b);
 
+    // Git + error search over synthetic commits (DB side only — real `git
+    // log` spawn cost is per-repo and measured by hand, not here).
+    const commitCount = Math.min(rows, 2000);
+    const commits: NewCommit[] = [];
+    for (let i = 0; i < commitCount; i++) {
+      commits.push({
+        hash: i.toString(16).padStart(40, "a"),
+        repoPath: `/repo/${i % 10}`,
+        message: `fix ${NOUNS[i % NOUNS.length]} ${i}`,
+        authorTs: 1_700_000_000 + i,
+        filesChanged: [`src/${NOUNS[(i + 1) % NOUNS.length]}.ts`],
+      });
+    }
+    bulkInsertCommits(commits);
+    const gitTimes: number[] = [];
+    const errorTimes: number[] = [];
+    for (let i = 0; i < queryCount; i++) {
+      const q = SAMPLE_QUERIES[i % SAMPLE_QUERIES.length] as string;
+      let s = Date.now();
+      searchCommits(q, 10);
+      gitTimes.push(Date.now() - s);
+      s = Date.now();
+      searchByError(`ValueError: ${q}`, 10);
+      errorTimes.push(Date.now() - s);
+    }
+    gitTimes.sort((a, b) => a - b);
+    errorTimes.sort((a, b) => a - b);
+
     let semanticP50: number | null = null;
     let semanticP95: number | null = null;
     let semanticNote = "--skip-semantic flag";
@@ -153,6 +189,10 @@ export async function runBench(opts: BenchOptions = {}): Promise<BenchResult> {
       semanticP50,
       semanticP95,
       semanticNote,
+      gitP50: percentile(gitTimes, 50),
+      gitP95: percentile(gitTimes, 95),
+      errorP50: percentile(errorTimes, 50),
+      errorP95: percentile(errorTimes, 95),
       rssMB: Math.round(process.memoryUsage().rss / 1048576),
     };
   } finally {
@@ -171,6 +211,8 @@ export function formatBench(r: BenchResult): string {
     `  import (bulk + FTS index): ${r.importMs}ms (${Math.round(r.rows / (r.importMs / 1000))} rows/s)`,
     `  FTS search:                p50=${r.ftsP50}ms p95=${r.ftsP95}ms`,
     `  semantic search:           ${sem}`,
+    `  commit search:             p50=${r.gitP50}ms p95=${r.gitP95}ms`,
+    `  error search:              p50=${r.errorP50}ms p95=${r.errorP95}ms`,
     `  peak RSS:                  ${r.rssMB}MB`,
   ].join("\n");
 }

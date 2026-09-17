@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { initDb, closeDb, bulkInsert, countEmbeddings } from "./db.ts";
 import {
   backfillMissingEmbeddings,
+  createTopK,
   EMBEDDING_MODEL,
   EMBEDDING_MODEL_ID,
   EMBEDDING_DIMS,
@@ -47,8 +48,7 @@ async function stubEmbed(texts: string[]): Promise<Float32Array[]> {
 // so these stay denied under any ambient config).
 const NOISE = ["ls", "cd", "clear", "exit"];
 
-test("model id contract: MiniLM family, 384 dims, q8 tag", () => {
-  expect(EMBEDDING_MODEL).toBe("Xenova/all-MiniLM-L6-v2");
+test("model id contract: MiniLM family, 384 dims, q8 tag", () => {  expect(EMBEDDING_MODEL).toBe("Xenova/all-MiniLM-L6-v2");
   expect(EMBEDDING_DIMS).toBe(384);
   expect(EMBEDDING_MODEL_ID).toContain(":q8");
   expect(getModelCacheDir().length).toBeGreaterThan(0);
@@ -135,4 +135,32 @@ test("overlong semantic queries throw before touching the model", async () => {
     err = e;
   }
   expect(String((err as Error)?.message ?? err)).toMatch(/too long/);
+});
+
+test("createTopK matches full stable sort, ties keep arrival order", () => {
+  let s = 123456789;
+  const rnd = (): number => {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    return s / 0x7fffffff;
+  };
+  for (const keep of [1, 5, 70]) {
+    const scores: { id: number; score: number }[] = [];
+    for (let id = 0; id < 2000; id++) scores.push({ id, score: Math.floor(rnd() * 10) / 10 });
+    const topK = createTopK(keep);
+    for (const c of scores) topK.consider(c.id, c.score);
+    const expected = [...scores]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, keep)
+      .map((c) => c.id);
+    expect(topK.sorted().map((c) => c.id)).toEqual(expected);
+  }
+  // Underfull fills; once full, low scores never displace.
+  const t = createTopK(3);
+  t.consider(1, 0.1);
+  t.consider(2, 0.9);
+  expect(t.sorted().map((c) => c.id)).toEqual([2, 1]);
+  t.consider(3, 0.05);
+  expect(t.sorted().map((c) => c.id)).toEqual([2, 1, 3]);
+  t.consider(4, 0.01);
+  expect(t.sorted().map((c) => c.id)).toEqual([2, 1, 3]);
 });
