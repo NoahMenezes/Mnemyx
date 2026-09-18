@@ -8,7 +8,7 @@ Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives
 
 Prerequisites: [Bun](https://bun.sh) ≥ 1.4 (the only runtime dependency) and `python3` (only needed for the optional exit-code hook).
 
-> Cold-install honesty: the npm package itself is tiny, but first install pulls ~550 MB of ONNX runtime binaries (multi-platform, install-time only) and the first semantic run downloads a ~23 MB model to `~/.cache/mnemyx/models` (then works offline forever). Keyword search needs none of that.
+> Cold-install honesty: the npm package itself is tiny (~92 KB). A full install pulls ~550 MB of ONNX runtime binaries (multi-platform, install-time only) and the first semantic run downloads a ~23 MB model to `~/.cache/mnemyx/models` (then works offline forever). Keyword search needs none of that — for a slim (~27 MB, measured) keyword-only install, omit optional dependencies at install time (`npm`/`bun`/`pnpm` all accept `--omit=optional`; check your manager's docs for the equivalent flag). Semantic queries on a slim install degrade to keyword search with an explanatory note; set `"embeddings": false` in config to silence it.
 
 ```bash
 # Option A: try it without installing (needs Bun)

@@ -5,6 +5,12 @@ The full history lives in git; this file is the narrative layer.
 
 ## Unreleased
 
+- **Slim installs (packaging)** — `@huggingface/transformers` moved to
+  `optionalDependencies`: omit optionals at install time for a ~27 MB
+  keyword-only install (measured) instead of ~550 MB. Slim installs
+  degrade to keyword search with an actionable hint; `"embeddings":
+  false` silences it. No code-path changes — the lazy dynamic import
+  already degraded gracefully.
 - **Learning-to-rank (Phase 13)** — habitual + recent commands rank
   above stale one-offs within equal outcome tiers, on both keyword and
   semantic paths. Tunable via `ranking` in config; zero weights restore
