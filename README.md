@@ -1,8 +1,14 @@
 # Mnemyx
 
+[![npm version](https://img.shields.io/npm/v/mnemyx.svg)](https://www.npmjs.com/package/mnemyx)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Bun](https://img.shields.io/badge/runtime-Bun_%E2%89%A5_1.4-black.svg)](https://bun.sh)
+
 Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives AI coding assistants a searchable memory of your real shell history.
 
 **The problem:** you solve the same cryptic errors repeatedly across projects and months, but the fix is buried unsearchable in `~/.zsh_history` or `~/.bash_history`. AI assistants (Claude Code, Claude Desktop, Cursor, …) have zero access to it and re-derive solutions from scratch every session. Mnemyx indexes your shell history locally — with full-text search, outcome tracking, and semantic matching — and exposes it as MCP tools, so any compatible client can ask *"have I solved this before?"* and get back what you actually ran, whether it worked, and what it means.
+
+**Contents:** [Quickstart](#5-minute-quickstart) · [Connect your client](#connect-your-ai-client) · [Using Mnemyx](#using-mnemyx) · [Tools](#tools) · [Dashboard](#dashboard-local-only-web-ui) · [How it works](#how-it-works) · [Git integration](#git-integration-phase-6) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) · [Privacy](#privacy-whats-stored-where-what-never-happens) · [Contributing](#contributing)
 
 ## 5-minute quickstart
 
@@ -181,6 +187,100 @@ extensions:
 ```
 
 No-client testing is always free via the MCP Inspector (see quickstart).
+
+## Using Mnemyx
+
+Two doors, same memory: the **CLI** for your terminal, the **MCP tools** for your AI assistant. Both read the same local index.
+
+### CLI reference — every command
+
+```bash
+mnemyx init [--yes] [--no-hook] [--shell zsh|bash]
+# First-time setup AND everyday refresh. Idempotent — re-run anytime to
+# import new history + index new commits. --yes skips confirmations,
+# --no-hook skips the shell-hook step, --shell forces zsh or bash.
+
+mnemyx status
+# Read-only health report. Changes nothing. Run this first whenever
+# anything looks off — commands, FTS docs, vectors, commits, repos,
+# hook state, and effective config:
+```
+
+```text
+mnemyx status (v0.1.0)
+
+Database:  /home/you/.local/share/mnemyx/mnemyx.db
+  commands:   2279
+  FTS index:  2279 docs
+  vectors:    1507 (Xenova/all-MiniLM-L6-v2:q8)
+  commits:    1361 (git history, Phase 6)
+  repos:      10 discovered under repoRoots
+Config:    /home/you/.mnemyx/config.json (using built-ins)
+  denylist: 16 entries, embeddings: true, exit codes: true, max age: unlimited
+Hook:      installed in /home/you/.zshrc
+Exit log:  368 lines (/home/you/.mnemyx/exit-codes.log)
+History files:
+  found    /home/you/.zsh_history (zsh)
+  found    /home/you/.bash_history (bash)
+Model cache: /home/you/.cache/mnemyx/models
+Plugins:   none (/home/you/.mnemyx/plugins)
+```
+
+```bash
+mnemyx run -- <command...>
+# Run anything with your terminal byte-identical AND log its exit code +
+# stderr tail locally. The exit code passes through untouched.
+mnemyx run -- python3 train.py --lr 0.01
+mnemyx run -- npm test
+# Failures become searchable via search_by_error; successes annotate history
+# rows with proven exit-0. This is how error output enters the index —
+# nothing is captured automatically (see Error search below).
+
+mnemyx export (--session <id> | --commit <hash>) [--with-diff] [--out FILE] [--force]
+# Shareable redacted markdown to stdout — or to an owner-only file with --out.
+mnemyx export --session s1726069200-myproj
+mnemyx export --commit b77d1e0 --with-diff --out notes.md
+# Secrets stay [redacted]; --out never overwrites without --force.
+# Get ids from list_sessions / search_commits (or their MCP twins below).
+
+mnemyx dashboard [--port 4877] [--no-open]
+# Local-only web UI (loopback, read-only): search, sessions, commits,
+# error search, status. --no-open for SSH/headless. Ctrl+C stops it.
+
+mnemyx bench [--rows N] [--queries N] [--skip-semantic]
+# Synthetic perf baseline on a throwaway DB. Changes nothing — safe to run
+# anytime you wonder "is it slow, or is it me".
+
+mnemyx --help | --version
+```
+
+### Recipes — the flows you'll actually use
+
+**1. "It broke — have I seen this before?" (debugging)**
+
+```bash
+mnemyx run -- python3 train.py --lr 0.01   # reproduces the failure + captures it
+```
+
+Then ask your assistant: *"Use mnemyx search_by_error for '<paste the traceback>'"* → past commands whose stderr matches, exact matches first, each with the proving snippet. Thin results? `search_history` automatically backfills from past error output too.
+
+**2. "What was I doing?" (standup, context restore)**
+
+Ask: *"Use mnemyx get_recent_commands"* for the last N commands, or *"Use mnemyx list_sessions for this repo"* for work bursts (when, how long, ok/fail/?, commits, top commands). Drill in with *"Use mnemyx get_session for \<id\>"*, share with *"Use mnemyx export_notes for that session"* — paste-ready markdown for the PR or wiki.
+
+**3. "Why does this line exist?" (code archaeology)**
+
+Ask in order: *"Use mnemyx get_repo_status for this repo"* (what's dirty right now) → *"Use mnemyx explain_line for \<file\> line \<N\> in this repo"* (blame → commit → what you ran before it) → *"Use mnemyx get_commit_diff for \<hash\>"* (the change, review-style) → *"Use mnemyx get_file_history for \<file\>"* (every commit that ever touched it).
+
+**4. "I just committed — make it searchable"**
+
+After every commit, ask *"Use mnemyx reindex_repos"* (or run `mnemyx init`). Then `search_commits` and `get_commit_story` know about it.
+
+**5. "Is it healthy?"**
+
+Run `mnemyx status`. Zero commands? Re-run `mnemyx init`. Zero commits? Add roots to `repoRoots` in `~/.mnemyx/config.json`. No vectors? Check stderr for `embedding model unavailable: <reason>`.
+
+Exact argument lists for every assistant-facing tool live in [Tools](#tools) below; the click-around twin of all of this is [Dashboard](#dashboard-local-only-web-ui).
 
 ## Platform support
 
