@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# CI: fast signal on every push and pull request. The release workflow owns
+# tags/binaries/npm-publish; this workflow owns "is main healthy".
+#
+# Jobs: typecheck + full hermetic suite + pack dry-run (validates the files
+# list) + server.json sanity (parses, version matches package.json).
+# ---------------------------------------------------------------------------
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Tests
+        run: bun test
+
+      - name: Pack dry-run (validates files list + prepack build)
+        run: bun pm pack --dry-run
+
+      - name: server.json sanity (parses, version matches package.json)
+        run: >-
+          bun -e 'const pkg = await Bun.file("package.json").json();
+          const srv = await Bun.file("server.json").json();
+          if (srv.version !== pkg.version) throw new Error(`server.json version ${srv.version} != package.json ${pkg.version}`);
+          const ids = (srv.packages ?? []).map((p) => p.identifier);
+          if (!ids.includes(pkg.name)) throw new Error(`server.json packages answer for ${pkg.name}`);
+          console.log(`server.json OK (${srv.version}, packages: ${ids.join(", ")})`);'

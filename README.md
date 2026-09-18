@@ -11,7 +11,14 @@ Prerequisites: [Bun](https://bun.sh) ≥ 1.4 (the only runtime dependency) and `
 > Cold-install honesty: the npm package itself is tiny (~92 KB). A full install pulls ~550 MB of ONNX runtime binaries (multi-platform, install-time only) and the first semantic run downloads a ~23 MB model to `~/.cache/mnemyx/models` (then works offline forever). Keyword search needs none of that — for a slim (~27 MB, measured) keyword-only install, omit optional dependencies at install time (`npm`/`bun`/`pnpm` all accept `--omit=optional`; check your manager's docs for the equivalent flag). Semantic queries on a slim install degrade to keyword search with an explanatory note; set `"embeddings": false` in config to silence it.
 
 ```bash
-# Option A: try it without installing (needs Bun)
+# Option A: install the published package (needs Bun ≥ 1.4)
+bun install -g mnemyx        # Bun
+npm install -g mnemyx        # npm
+pnpm add -g mnemyx           # pnpm
+yarn global add mnemyx       # Yarn (classic)
+mnemyx init
+
+# ...or try it without installing (needs Bun)
 bunx mnemyx init
 
 # Option B: from source
@@ -19,6 +26,14 @@ git clone https://github.com/NoahMenezes/Mnemyx.git && cd Mnemyx
 bun install
 bun run src/cli.ts init
 ```
+
+No Bun? Grab a standalone binary from the
+[Releases page](https://github.com/NoahMenezes/Mnemyx/releases)
+(`mnemyx-<os>-<arch>` = CLI, `mnemyx-server-<os>-<arch>` = MCP server —
+point your client at the server binary directly, no `bun run` prefix).
+Binaries serve keyword search plus all history/git/session tools; semantic
+embeddings need the npm install above (the ONNX native binding can't be
+compiled in — the binary says so on stderr and keeps serving).
 
 `mnemyx init` walks you through four steps: environment check → history import + git indexing (both idempotent, safe to re-run) → **optional** shell-hook install or v1→v2 upgrade (asks first, never silent) → client registration commands. Then verify:
 
@@ -34,7 +49,7 @@ bunx @modelcontextprotocol/inspector bun run src/index.ts
 
 ## Connect your AI client
 
-The server runs over stdio — the client spawns it locally. Replace the paths with your checkout (or installed package) location.
+The server runs over stdio — the client spawns it locally. Replace the paths with your checkout (or installed package) location: source checkouts use `src/index.ts`, global installs use the package's `dist/index.js` (e.g. `$(npm root -g)/mnemyx/dist/index.js`), and standalone-binary users point at the `mnemyx-server-<os>-<arch>` binary directly with no `bun run` prefix. (`mnemyx init` prints the exact commands for your setup.)
 
 **Claude Code** (terminal — `mnemyx init` can run this for you with consent):
 
