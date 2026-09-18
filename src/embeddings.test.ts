@@ -6,6 +6,7 @@ import { initDb, closeDb, bulkInsert, countEmbeddings } from "./db.ts";
 import {
   backfillMissingEmbeddings,
   createTopK,
+  describeLoadFailure,
   EMBEDDING_MODEL,
   EMBEDDING_MODEL_ID,
   EMBEDDING_DIMS,
@@ -72,6 +73,44 @@ test("no static value-import of transformers (Intel-Mac crash guard)", async () 
       !l.includes("import type")
   );
   expect(staticImports).toEqual([]);
+});
+
+test("transformers is an optionalDependency (slim installs stay slim)", async () => {
+  // The ~550MB ONNX runtime must never be a hard install requirement:
+  // keyword search needs none of it. This pins the package.json
+  // classification next to the no-static-import guard above.
+  const pkg = (await Bun.file(
+    new URL("../package.json", import.meta.url)
+  ).json()) as {
+    dependencies?: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
+  };
+  expect(pkg.dependencies?.["@huggingface/transformers"]).toBeUndefined();
+  expect(
+    pkg.optionalDependencies?.["@huggingface/transformers"]
+  ).toMatch(/^\^?\d+\./);
+});
+
+test("missing transformers package gets an actionable hint", () => {
+  // Node-style and Bun-style resolution errors alike.
+  for (const raw of [
+    "Cannot find module '@huggingface/transformers' from '/$bunfs/root/x'",
+    "Cannot find package '@huggingface/transformers' imported from '/tmp/slimtest/node_modules/mnemyx/dist/index.js'",
+  ]) {
+    const hint = describeLoadFailure(new Error(raw));
+    expect(hint).toContain("@huggingface/transformers is not installed");
+    expect(hint).toContain("--omit=optional");
+    expect(hint).toContain('"embeddings": false');
+  }
+});
+
+test("other load failures pass through verbatim", () => {
+  expect(describeLoadFailure(new Error("sharp module blew up"))).toBe(
+    "sharp module blew up"
+  );
+  expect(describeLoadFailure("plain string failure")).toBe(
+    "plain string failure"
+  );
 });
 
 test("backfill covers everything past noise heads and sparse ids", async () => {

@@ -61,6 +61,25 @@ let extractorPromise: Promise<FeatureExtractionPipeline> | null = null;
 let loadFailed = false;
 let loadFailureReason = "unknown";
 
+// Human-readable cause for a failed model load. A missing transformers
+// package (slim install with optionals omitted) gets an actionable hint;
+// every other failure passes through verbatim. Pure so tests pin it.
+export function describeLoadFailure(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (
+    msg.includes("@huggingface/transformers") &&
+    // Node says "Cannot find module", Bun says "Cannot find package".
+    /cannot find (module|package)|not installed|failed to resolve/i.test(msg)
+  ) {
+    return (
+      "@huggingface/transformers is not installed (slim install with " +
+      "optional dependencies omitted — reinstall without --omit=optional, " +
+      'or set "embeddings": false for keyword-only search)'
+    );
+  }
+  return msg;
+}
+
 async function getExtractor(): Promise<FeatureExtractionPipeline> {
   if (loadFailed) {
     throw new Error(`embedding model unavailable: ${loadFailureReason}`);
@@ -88,7 +107,7 @@ async function getExtractor(): Promise<FeatureExtractionPipeline> {
         return ext;
       } catch (err) {
         loadFailed = true;
-        loadFailureReason = err instanceof Error ? err.message : String(err);
+        loadFailureReason = describeLoadFailure(err);
         extractorPromise = null;
         throw new Error(`embedding model unavailable: ${loadFailureReason}`);
       }

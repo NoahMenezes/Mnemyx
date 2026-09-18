@@ -15,7 +15,7 @@
   "module": "dist/index.js",
   "type": "module",
   "bin": {
-    "mnemyx": "./dist/cli.js"
+    "mnemyx": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -54,8 +54,11 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.3.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.6.5"
-  }
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^4.3.0"
+  },
+  "main": "index.js"
 }
