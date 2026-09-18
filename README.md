@@ -6,26 +6,30 @@ Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives
 
 ## 5-minute quickstart
 
-Prerequisites: [Bun](https://bun.sh) ≥ 1.4 (the only runtime dependency) and `python3` (only needed for the optional exit-code hook).
-
-> Cold-install honesty: the npm package itself is tiny (~92 KB). A full install pulls ~550 MB of ONNX runtime binaries (multi-platform, install-time only) and the first semantic run downloads a ~23 MB model to `~/.cache/mnemyx/models` (then works offline forever). Keyword search needs none of that — for a slim (~27 MB, measured) keyword-only install, omit optional dependencies at install time (`npm`/`bun`/`pnpm` all accept `--omit=optional`; check your manager's docs for the equivalent flag). Semantic queries on a slim install degrade to keyword search with an explanatory note; set `"embeddings": false` in config to silence it.
+### 1. Install — pick one
 
 ```bash
-# Option A: install the published package (needs Bun ≥ 1.4)
-bun install -g mnemyx        # Bun
-npm install -g mnemyx        # npm
+bun install -g mnemyx        # recommended (needs Bun >= 1.4 — https://bun.sh)
+npm install -g mnemyx        # needs Node/npm + Bun ≥ 1.4 on PATH
 pnpm add -g mnemyx           # pnpm
 yarn global add mnemyx       # Yarn (classic)
-mnemyx init
+```
 
-# ...or try it without installing (needs Bun)
+Just trying it? No install needed (needs Bun):
+
+```bash
 bunx mnemyx init
+```
 
-# Option B: from source
+From source:
+
+```bash
 git clone https://github.com/NoahMenezes/Mnemyx.git && cd Mnemyx
 bun install
 bun run src/cli.ts init
 ```
+
+> Size honesty: the package itself is tiny (~92 KB). A full install pulls ~550 MB of ONNX runtime binaries (install-time only, multi-platform) and the first semantic run downloads a ~23 MB model to `~/.cache/mnemyx/models` (then works offline forever). Want a slim (~27 MB, keyword-only) install? Append `--omit=optional` (`npm`/`bun`/`pnpm` all accept it). Semantic queries then fall back to keyword search; set `"embeddings": false` in config to silence the note.
 
 No Bun? Grab a standalone binary from the
 [Releases page](https://github.com/NoahMenezes/Mnemyx/releases)
@@ -35,7 +39,15 @@ Binaries serve keyword search plus all history/git/session tools; semantic
 embeddings need the npm install above (the ONNX native binding can't be
 compiled in — the binary says so on stderr and keeps serving).
 
-`mnemyx init` walks you through four steps: environment check → history import + git indexing (both idempotent, safe to re-run) → **optional** shell-hook install or v1→v2 upgrade (asks first, never silent) → client registration commands. Then verify:
+`python3` is only needed for the optional exit-code hook.
+
+### 2. Set up
+
+```bash
+mnemyx init
+```
+
+Walks you through four steps: environment check → history import + git indexing (both idempotent, safe to re-run) → **optional** shell-hook install or v1→v2 upgrade (asks first, never silent) → client registration commands. Then verify:
 
 1. `mnemyx status` — commands indexed, FTS docs, vectors, commits, repos, hook state.
 2. In your client: ask it to call `get_recent_commands` — you should see your real recent commands.
@@ -46,6 +58,31 @@ No client handy? Test with the MCP Inspector (no setup needed):
 ```bash
 bunx @modelcontextprotocol/inspector bun run src/index.ts
 ```
+
+### 3. Update
+
+```bash
+bun install -g mnemyx@latest      # or: npm update -g mnemyx / pnpm add -g mnemyx@latest / yarn global add mnemyx
+mnemyx init                       # re-run: indexes new commits, upgrades the hook if needed (safe anytime)
+```
+
+### 4. Uninstall — remove everything
+
+```bash
+bun remove -g mnemyx              # or: npm uninstall -g mnemyx / pnpm remove -g mnemyx / yarn global remove mnemyx
+```
+
+That removes the program. Your shell hook and local data stay until you delete them:
+
+```bash
+# 1. hook: delete the block marked "--- Mnemyx" from ~/.zshrc and/or ~/.bashrc, then restart your shell
+# 2. data (Linux):
+rm -rf ~/.mnemyx ~/.local/share/mnemyx ~/.cache/mnemyx/models
+#    data (macOS):
+rm -rf ~/.mnemyx ~/Library/Application\ Support/mnemyx ~/.cache/mnemyx/models
+```
+
+What each path holds: `~/.mnemyx/` = config + exit-code log; the `share` / `Application Support` dir = SQLite index (rebuilt by `mnemyx init`); `models` = downloaded embedding weights (re-downloaded on demand).
 
 ## Connect your AI client
 
@@ -432,7 +469,7 @@ history tools unaffected, no stderr → error tools report empty, never crash.
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
-bun test             # 182 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
+bun test             # 186 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 ```
 
