@@ -13,6 +13,12 @@
 # search with an honest stderr note; semantic embeddings work in the npm
 # (Bun) install where node_modules is intact. History, git, sessions,
 # dashboard, and all other tools are unaffected.
+#
+# npm publish runs in the `publish` job on the same tags (keyless OIDC, no
+# stored tokens). Human prerequisite, once: `npm login` + first manual
+# `npm publish`, then enable Trusted Publisher for this repo in the npm web
+# UI. Until then the publish job fails with an auth error and binaries still
+# release fine.
 # ---------------------------------------------------------------------------
 
 name: release
@@ -79,3 +85,30 @@ jobs:
             dist-bin/mnemyx-*
             dist-bin/SHA256SUMS.txt
           generate_release_notes: true
+
+  publish:
+    needs: [binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # keyless npm auth via Trusted Publisher (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Publish to npm (provenance via OIDC)
+        # prepack rebuilds dist/; publishConfig sets public access +
+        # provenance, flags repeated here so `npm publish --dry-run`
+        # behaves identically.
+        run: npm publish --provenance --access public
