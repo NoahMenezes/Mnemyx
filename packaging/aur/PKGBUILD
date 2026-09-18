@@ -1,0 +1,43 @@
+# Maintainer: Noah Menezes <2006noahmenezes@gmail.com>
+# AUR package for Mnemyx (prebuilt standalone binaries, no Bun needed).
+# Submit with:  git clone ssh://aur@aur.archlinux.org/mnemyx-bin.git, copy
+# these files in, `makepkg --printsrcinfo > .SRCINFO`, `makepkg -si` to test,
+# then `git push`. Bump pkgver per release and refresh the sha256sums from
+# that release's SHA256SUMS.txt (`updpkgsums` does it automatically).
+pkgname=mnemyx-bin
+_pkgname=mnemyx
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local-first MCP server: searchable memory of your shell history"
+arch=('x86_64' 'aarch64')
+url="https://github.com/NoahMenezes/Mnemyx"
+license=('MIT')
+provides=('mnemyx')
+conflicts=('mnemyx')
+source_x86_64=(
+  "$_pkgname-$pkgver-linux-x64::https://github.com/NoahMenezes/Mnemyx/releases/download/v$pkgver/mnemyx-linux-x64"
+  "mnemyx-server-$pkgver-linux-x64::https://github.com/NoahMenezes/Mnemyx/releases/download/v$pkgver/mnemyx-server-linux-x64"
+)
+source_aarch64=(
+  "$_pkgname-$pkgver-linux-arm64::https://github.com/NoahMenezes/Mnemyx/releases/download/v$pkgver/mnemyx-linux-arm64"
+  "mnemyx-server-$pkgver-linux-arm64::https://github.com/NoahMenezes/Mnemyx/releases/download/v$pkgver/mnemyx-server-linux-arm64"
+)
+sha256sums_x86_64=(
+  'FILL_FROM_SHA256SUMS_TXT'
+  'FILL_FROM_SHA256SUMS_TXT'
+)
+sha256sums_aarch64=(
+  'FILL_FROM_SHA256SUMS_TXT'
+  'FILL_FROM_SHA256SUMS_TXT'
+)
+
+package() {
+  if [[ $CARCH == x86_64 ]]; then
+    _suffix=x64
+  else
+    _suffix=arm64
+  fi
+  install -Dm755 "$_pkgname-$pkgver-linux-$_suffix" "$pkgdir/usr/bin/mnemyx"
+  install -Dm755 "mnemyx-server-$pkgver-linux-$_suffix" "$pkgdir/usr/bin/mnemyx-server"
+  install -Dm644 "$srcdir/../../LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+}
