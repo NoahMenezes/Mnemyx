@@ -449,7 +449,6 @@ src/
     server.ts       #   Bun.serve wiring (127.0.0.1, GET-only routes)
     api.ts          #   masked JSON handlers (same queries as MCP tools)
     page.html       #   single-file UI (tabs, tables, no dependencies)
-  cli.ts            # `mnemyx` binary: init wizard (consent-gated), status, help
   import.ts         # the one shared import pipeline (server and CLI both use it)
   db.ts             # barrel: re-exports src/db/* (public API unchanged)
   db/               # SQLite layer, one concern per file:
@@ -477,6 +476,9 @@ src/
   plugins.ts        # Phase 13: ~/.mnemyx/plugins loader + psql reference (see PLUGINS.md)
   redact.ts         # secrets redaction for tool output (store raw, display masked)
   hook.ts           # shell-hook snippets (v2: exit+cwd+repo) + consent-gated installer/upgrader
+  bench.ts          # synthetic perf baseline for `mnemyx bench` (temp DB, changes nothing)
+  export.ts         # shareable redacted-markdown builders (sessions + commit stories)
+  fsutil.ts         # small filesystem helpers (owner-only checks, fd-level reads)
   *.test.ts         # hermetic suite: bun test (temp DBs, fixture strings, stub model)
 ```
 
