@@ -60,5 +60,5 @@
   "optionalDependencies": {
     "@huggingface/transformers": "^4.3.0"
   },
-  "main": "index.js"
+  "main": "dist/index.js"
 }
