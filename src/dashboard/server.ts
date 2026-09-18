@@ -21,6 +21,9 @@ import {
 import packageJson from "../../package.json" with { type: "json" };
 
 export const DEFAULT_DASHBOARD_PORT = 4877;
+// Single-file UI. Resolves next to this module in a source checkout
+// (`src/dashboard/page.html`) and next to the bundle in an install
+// (`dist/page.html`) — `bun run build` copies it there; keep that step.
 const PAGE = join(dirname(fileURLToPath(import.meta.url)), "page.html");
 
 function notFound(): Response {

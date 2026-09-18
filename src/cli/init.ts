@@ -18,7 +18,7 @@ import {
 } from "../hook.ts";
 import { backfillMissingEmbeddings } from "../embeddings.ts";
 import { getDefaultDbPath } from "../db.ts";
-import { VERSION, SERVER_PATH, BUN_BIN } from "./shared.ts";
+import { VERSION, SERVER_PATH, BUN_BIN, INSTALLED } from "./shared.ts";
 import { ask, askText } from "./input.ts";
 
 export interface InitFlags {
@@ -257,6 +257,9 @@ export async function cmdInit(rawArgs: string[]): Promise<number> {
     console.log(`[4/4] Register with your AI client:\n`);
     for (const b of registrationBlocks()) {
       console.log(`  ${b.title}\n${b.body}\n`);
+    }
+    if (!INSTALLED) {
+      console.log(`  (Paths above point at this source checkout — for a stable client registration prefer a global install: bun install -g mnemyx. bunx cache paths can shift between versions.)\n`);
     }
     const claudeBin = Bun.which("claude");
     if (claudeBin) {

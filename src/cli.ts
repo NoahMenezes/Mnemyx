@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 // ---------------------------------------------------------------------------
 // `mnemyx` setup CLI. Command implementations live in src/cli/* (one per
-// file); this entry point only prints usage and dispatches. The bin target
-// (package.json) stays here, so installed `mnemyx` keeps working.
+// file); this entry point only prints usage and dispatches. `bun run build`
+// bundles this file to dist/cli.js — the installed `mnemyx` bin target — so
+// keep this module free of src-relative path assumptions (see cli/shared.ts).
 // ---------------------------------------------------------------------------
 import { VERSION } from "./cli/shared.ts";
 import { collectStatus, printStatus } from "./cli/status.ts";

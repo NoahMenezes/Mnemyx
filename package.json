@@ -12,15 +12,18 @@
   "bugs": {
     "url": "https://github.com/NoahMenezes/mnemyx/issues"
   },
-  "module": "src/index.ts",
+  "module": "dist/index.js",
   "type": "module",
   "bin": {
-    "mnemyx": "./src/cli.ts"
+    "mnemyx": "./dist/cli.js"
   },
   "files": [
-    "src",
+    "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "PLUGINS.md",
+    "CHANGELOG.md",
+    "server.json"
   ],
   "keywords": [
     "mcp",
@@ -31,11 +34,19 @@
     "ai-assistant",
     "cli"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "engines": {
     "bun": ">=1.4"
   },
   "scripts": {
-    "prepublishOnly": "bunx tsc --noEmit && bun test"
+    "build": "bun build ./src/cli.ts ./src/index.ts --outdir ./dist --target bun --packages external && cp ./src/dashboard/page.html ./dist/page.html && chmod +x ./dist/cli.js",
+    "prepack": "bun run build",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
+    "prepublishOnly": "bun run typecheck && bun test"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
