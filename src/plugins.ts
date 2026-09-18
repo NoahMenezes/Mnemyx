@@ -134,7 +134,7 @@ export async function loadPluginEntries(
       console.error(`[mnemyx] skipping plugin ${file}: ${reason}`);
     };
     if (!ownerOnly(path)) {
-      skip("not owner-writable-only (chmod 600 to allow)");
+      skip("writable by group/other (chmod 600 to allow)");
       continue;
     }
     let mod: unknown;
