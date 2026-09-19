@@ -3,7 +3,7 @@
   "name": "io.github.NoahMenezes/mnemyx",
   "title": "Mnemyx",
   "description": "Local-first searchable memory of your shell history: full-text plus semantic search, exit-code tracking, git commit correlation with review-style diffs, and error-message fingerprinting.",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "repository": {
     "source": "github",
     "url": "https://github.com/NoahMenezes/Mnemyx"
@@ -12,7 +12,7 @@
     {
       "registryType": "npm",
       "identifier": "mnemyx",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "transport": { "type": "stdio" }
     }
   ]

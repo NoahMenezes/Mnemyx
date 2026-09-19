@@ -250,7 +250,7 @@ mnemyx doctor
 ```
 
 ```text
-mnemyx status (v0.1.0)
+mnemyx status (v0.1.2)
 
 Database:  /home/you/.local/share/mnemyx/mnemyx.db
   commands:   2279

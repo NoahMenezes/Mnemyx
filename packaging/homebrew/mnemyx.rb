@@ -10,26 +10,26 @@
 class Mnemyx < Formula
   desc "Local-first searchable memory of your shell history (MCP server)"
   homepage "https://github.com/NoahMenezes/Mnemyx"
-  version "0.1.0"
+  version "0.1.2"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-darwin-arm64"
+      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-darwin-arm64"
       sha256 "FILL_FROM_SHA256SUMS_TXT"
     end
     on_intel do
-      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-darwin-x64"
+      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-darwin-x64"
       sha256 "FILL_FROM_SHA256SUMS_TXT"
     end
   end
   on_linux do
     on_arm do
-      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-linux-arm64"
+      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-linux-arm64"
       sha256 "FILL_FROM_SHA256SUMS_TXT"
     end
     on_intel do
-      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-linux-x64"
+      url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-linux-x64"
       sha256 "FILL_FROM_SHA256SUMS_TXT"
     end
   end
@@ -38,21 +38,21 @@ class Mnemyx < Formula
   resource "mnemyx-server" do
     on_macos do
       on_arm do
-        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-server-darwin-arm64"
+        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-server-darwin-arm64"
         sha256 "FILL_FROM_SHA256SUMS_TXT"
       end
       on_intel do
-        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-server-darwin-x64"
+        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-server-darwin-x64"
         sha256 "FILL_FROM_SHA256SUMS_TXT"
       end
     end
     on_linux do
       on_arm do
-        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-server-linux-arm64"
+        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-server-linux-arm64"
         sha256 "FILL_FROM_SHA256SUMS_TXT"
       end
       on_intel do
-        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.0/mnemyx-server-linux-x64"
+        url "https://github.com/NoahMenezes/Mnemyx/releases/download/v0.1.2/mnemyx-server-linux-x64"
         sha256 "FILL_FROM_SHA256SUMS_TXT"
       end
     end

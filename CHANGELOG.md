@@ -3,6 +3,23 @@
 All notable changes to Mnemyx. Versions follow semantic versioning.
 The full history lives in git; this file is the narrative layer.
 
+## 0.1.2 — MCP stability + deployment readiness
+
+- **Never `-32000` on startup** — the server degrades instead of dying:
+  import, config, and embedding-count failures log a repair hint and keep
+  serving the existing index (`mnemyx status` / `mnemyx init` fix the cause).
+- **New `mnemyx doctor` command** — deployment self-check: bun path,
+  server entry, dashboard bundle, DB writability, config, history files,
+  plus a real MCP handshake. Exit 0 = launchable.
+- **Packaging that launches** — `dist/index.js` is executable with a bun
+  shebang, plus a dedicated `mnemyx-server` bin so registry/`bunx` flows
+  speak MCP instead of printing CLI usage.
+- **Docs that match installs** — per-install client table (source /
+  global / binary), absolute-path + timeout + restart rules, `doctor`
+  wired into quickstart, recipes, config, and troubleshooting.
+- **CI guards the npm artifact** — handshake test on `bun run
+  dist/index.js`, exec-bit + `page.html` assertions.
+
 ## Unreleased
 
 - **Slim installs (packaging)** — `@huggingface/transformers` moved to

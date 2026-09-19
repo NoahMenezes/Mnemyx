@@ -6,7 +6,7 @@
 # that release's SHA256SUMS.txt (`updpkgsums` does it automatically).
 pkgname=mnemyx-bin
 _pkgname=mnemyx
-pkgver=0.1.0
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Local-first MCP server: searchable memory of your shell history"
 arch=('x86_64' 'aarch64')
