@@ -74,7 +74,16 @@ jobs:
           sha256sum -c SHA256SUMS.txt
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        # Attestations require a PUBLIC repo (or GHES with GHAS) — on a
+        # user-owned private repo the attest API returns:
+        # "Failed to persist attestation: Feature not available for
+        #  user-owned private repositories."
+        # Gate on visibility + continue-on-error so private-repo releases
+        # stay green; provenance lights up automatically when flipped public.
+        # v3 also runs on Node 24 (v2 pulled Node 20, now deprecated).
+        if: github.event.repository.visibility == 'public'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: "dist-bin/mnemyx-*, dist-bin/SHA256SUMS.txt"
 

@@ -8,7 +8,7 @@ Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives
 
 **The problem:** you solve the same cryptic errors repeatedly across projects and months, but the fix is buried unsearchable in `~/.zsh_history` or `~/.bash_history`. AI assistants (Claude Code, Claude Desktop, Cursor, …) have zero access to it and re-derive solutions from scratch every session. Mnemyx indexes your shell history locally — with full-text search, outcome tracking, and semantic matching — and exposes it as MCP tools, so any compatible client can ask *"have I solved this before?"* and get back what you actually ran, whether it worked, and what it means.
 
-**Contents:** [Quickstart](#5-minute-quickstart) · [Connect your client](#connect-your-ai-client) · [Using Mnemyx](#using-mnemyx) · [Tools](#tools) · [Dashboard](#dashboard-local-only-web-ui) · [How it works](#how-it-works) · [Secrets redaction](#secrets-redaction) · [Error search](#error-search-phase-8) · [Git integration](#git-integration-phase-6) · [Architecture](#architecture) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) · [Privacy](#privacy-whats-stored-where-what-never-happens) · [Contributing](#contributing)
+**Contents:** [Quickstart](#5-minute-quickstart) · [Connect your client](#connect-your-ai-client) · [Using Mnemyx](#using-mnemyx) · [Tools](#tools) · [Dashboard](#dashboard-local-only-web-ui) · [How it works](#how-it-works) · [Secrets redaction](#secrets-redaction) · [Error search](#error-search-phase-8) · [Git integration](#git-integration-phase-6) · [Architecture](#architecture) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) · [Privacy](#privacy-whats-stored-where-what-never-happens) · [Contributing](#contributing) · [Releases](#releases--provenance-maintainers)
 
 ## 5-minute quickstart
 
@@ -623,6 +623,49 @@ bun run src/cli.ts doctor   # deployability check (bun, entry, live MCP handshak
 - Every phase must stay shippable alone: new behavior degrades to old behavior when its input is absent (no hook log → Phase 2 results; no model → keyword search; no history file → skip, never crash).
 - stdout belongs to the MCP transport in `src/index.ts` — log to stderr only.
 - Test against real history in an isolated way: point `HOME` at a temp dir for import tests, use temp DB paths via `initDb(path)`, never commit `*.db*` files.
+
+## Releases & provenance (maintainers)
+
+Tag `v*` triggers `.github/workflows/release.yml`: cross-compiled standalone binaries (`mnemyx-<os>-<arch>`, `mnemyx-server-<os>-<arch>` for linux-x64/arm64, darwin-x64/arm64) → GitHub Release with `SHA256SUMS.txt` → npm publish (keyless OIDC, needs one-time `npm login` + Trusted Publisher enabled, otherwise the `publish` job fails with auth error while binaries still release fine).
+
+Release with:
+
+```bash
+git tag v0.1.3 && git push --tags
+```
+
+### Build provenance on private repos — the `attest` failure, fixed
+
+The workflow's `Attest build provenance` step used to fail the whole release on private repos with:
+
+```text
+Run actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc
+Error: Failed to persist attestation: Feature not available for user-owned private repositories.
+```
+
+Root cause: GitHub Artifact Attestations are only available on **public** repos (all plans) or private/internal repos with GitHub Enterprise Cloud + GHAS. On a user-owned private repo (Free/Pro/Team) the API refuses to store the attestation — binaries and the Release itself are fine, only this step goes red. Workflow permissions (`id-token: write`, `attestations: write`) were already correct; no permission change fixes it.
+
+Fix applied in `release.yml` (three parts, all intentional):
+
+```yaml
+- name: Attest build provenance
+  if: github.event.repository.visibility == 'public'
+  continue-on-error: true
+  uses: actions/attest-build-provenance@v3
+```
+
+1. `if: ... == 'public'` — skip while private; lights up automatically when the repo is flipped public, no re-edit needed.
+2. `continue-on-error: true` — belt-and-suspenders: even on public, a transient Sigstore outage warns instead of failing the release (and unblocking the `publish` job, which `needs: [binaries]`).
+3. `v2` → `v3` — clears the `Node 20 is being deprecated` runner warning (`v2` chain runs on `node20`; `v3` runs on `node24`). Inputs (`subject-path`) are unchanged. `id-token: write` + `attestations: write` are kept declared — harmless while private, required when public.
+
+Behavior matrix:
+
+| Repo visibility | Attest step | Release | npm publish |
+|---|---|---|---|
+| Private (current) | Skipped (green) | Binaries + Release upload normally, `SHA256SUMS.txt` still generated + verified in CI | Works once Trusted Publisher is configured |
+| Public | Runs, attaches Sigstore provenance to `dist-bin/mnemyx-*` + `SHA256SUMS.txt` | Same, plus provenance | Same, plus npm `--provenance` |
+
+If you want provenance on a private repo today, the only paths are GitHub Enterprise Cloud or making the repo public — there is no workflow flag that enables it on Free/Pro/Team private repos.
 
 ## Project layout
 
