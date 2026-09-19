@@ -8,7 +8,7 @@ Mnemyx is a local-first [MCP](https://modelcontextprotocol.io) server that gives
 
 **The problem:** you solve the same cryptic errors repeatedly across projects and months, but the fix is buried unsearchable in `~/.zsh_history` or `~/.bash_history`. AI assistants (Claude Code, Claude Desktop, Cursor, …) have zero access to it and re-derive solutions from scratch every session. Mnemyx indexes your shell history locally — with full-text search, outcome tracking, and semantic matching — and exposes it as MCP tools, so any compatible client can ask *"have I solved this before?"* and get back what you actually ran, whether it worked, and what it means.
 
-**Contents:** [Quickstart](#5-minute-quickstart) · [Connect your client](#connect-your-ai-client) · [Using Mnemyx](#using-mnemyx) · [Tools](#tools) · [Dashboard](#dashboard-local-only-web-ui) · [How it works](#how-it-works) · [Git integration](#git-integration-phase-6) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) · [Privacy](#privacy-whats-stored-where-what-never-happens) · [Contributing](#contributing)
+**Contents:** [Quickstart](#5-minute-quickstart) · [Connect your client](#connect-your-ai-client) · [Using Mnemyx](#using-mnemyx) · [Tools](#tools) · [Dashboard](#dashboard-local-only-web-ui) · [How it works](#how-it-works) · [Secrets redaction](#secrets-redaction) · [Error search](#error-search-phase-8) · [Git integration](#git-integration-phase-6) · [Architecture](#architecture) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) · [Privacy](#privacy-whats-stored-where-what-never-happens) · [Contributing](#contributing)
 
 ## 5-minute quickstart
 
@@ -26,6 +26,8 @@ Just trying it? No install needed (needs Bun):
 ```bash
 bunx mnemyx init
 ```
+
+> Throwaway trial only: `bunx` cache paths shift between versions, so a client registered against one breaks on the next update (`-32000`). Re-register after a real install below.
 
 From source:
 
@@ -62,10 +64,12 @@ Walks you through four steps: environment check → history import + git indexin
 
 If the client shows `MCP error -32000: Connection closed`: run `mnemyx doctor` first — it names the broken piece (stale path, bare `bun`, missing file). Then restart the client.
 
-No client handy? Test with the MCP Inspector (no setup needed):
+No client handy? Test with the MCP Inspector (no setup needed — run from the checkout, or swap in your global `dist/index.js` path):
 
 ```bash
-bunx @modelcontextprotocol/inspector bun run src/index.ts
+bun run src/cli.ts init   # from the checkout once, so there's something indexed
+bunx @modelcontextprotocol/inspector /home/you/.bun/bin/bun run /absolute/path/to/mnemyx/src/index.ts
+# global install: ... /absolute/path/to/mnemyx/dist/index.js (same shape, absolute bun path)
 ```
 
 ### 3. Update
@@ -73,6 +77,7 @@ bunx @modelcontextprotocol/inspector bun run src/index.ts
 ```bash
 bun install -g mnemyx@latest      # or: npm update -g mnemyx / pnpm add -g mnemyx@latest / yarn global add mnemyx
 mnemyx init                       # re-run: indexes new commits, upgrades the hook if needed (safe anytime)
+mnemyx doctor                     # confirm the registered server path still resolves after the update
 ```
 
 ### 4. Uninstall — remove everything
@@ -316,7 +321,7 @@ After every commit, ask *"Use mnemyx reindex_repos"* (or run `mnemyx init`). The
 
 **5. "Is it healthy?"**
 
-Run `mnemyx status`. Zero commands? Re-run `mnemyx init`. Zero commits? Add roots to `repoRoots` in `~/.mnemyx/config.json`. No vectors? Check stderr for `embedding model unavailable: <reason>`.
+Run `mnemyx status` for the index plus `mnemyx doctor` for deployability. Zero commands? Re-run `mnemyx init`. Zero commits? Add roots to `repoRoots` in `~/.mnemyx/config.json`. No vectors? Check stderr for `embedding model unavailable: <reason>`. Client `-32000` while status looks fine? That's `doctor` territory (stale path, bare `bun`, timeout) — status can't see it.
 
 Exact argument lists for every assistant-facing tool live in [Tools](#tools) below; the click-around twin of all of this is [Dashboard](#dashboard-local-only-web-ui).
 
@@ -542,9 +547,9 @@ Mnemyx correlates shell history with local git history, so the AI answers "what 
     graph/status/log --follow)             explain_line / repo_log / ─────────────────┤
                                            repo_status / file_history                  │
   discover+index ··························→ reindex_repos ───────────────────────────┤
-                                                                                       ↓
+                                                                                        ↓
                                                               MCP stdio server (index.ts)
-                                              CLI: init / status / bench / run (cli.ts)
+                                              CLI: init / status / doctor / bench / run / export / dashboard (cli.ts)
 ```
 
 Labels: `──→` stored (SQLite), `····→` computed on demand (git CLI / in-memory).
@@ -583,7 +588,7 @@ history tools unaffected, no stderr → error tools report empty, never crash.
 | `plugins` | `true` | `false` = ignore `~/.mnemyx/plugins/` entirely |
 | `disabledPlugins` | `[]` | Plugin names to skip (see `PLUGINS.md`) |
 
-`mnemyx status` prints the effective configuration plus DB/hook/model health without changing anything.
+`mnemyx status` prints the effective configuration plus DB/hook/model health without changing anything. `mnemyx doctor` goes one step further and proves the client can actually spawn the server (bun path, entry file, live handshake).
 
 ## Troubleshooting
 
@@ -610,6 +615,7 @@ bun install          # deps (Bun only — never npm/yarn)
 bunx tsc --noEmit    # must be clean before any PR
 bun test             # 186 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
+bun run src/cli.ts doctor   # deployability check (bun, entry, live MCP handshake)
 ```
 
 - Runtime is Bun; storage is `bun:sqlite` (no `better-sqlite3`, no native compilation); MCP over stdio only.
