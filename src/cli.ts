@@ -11,6 +11,7 @@ import { cmdInit } from "./cli/init.ts";
 import { cmdRun } from "./cli/run.ts";
 import { cmdExport } from "./cli/exportCmd.ts";
 import { cmdDashboard } from "./cli/dashboardCmd.ts";
+import { cmdDoctor } from "./cli/doctor.ts";
 
 function usage(): string {
   return `mnemyx v${VERSION} — searchable memory of your shell history (local-first)
@@ -18,6 +19,7 @@ function usage(): string {
 Usage:
   mnemyx init [--yes] [--no-hook] [--shell zsh|bash]   First-time setup wizard
   mnemyx status                                        Health report (changes nothing)
+  mnemyx doctor                                        Deployment self-check (bun, server entry, MCP handshake)
   mnemyx bench [--rows N] [--queries N] [--skip-semantic]  Synthetic perf baseline (temp DB, changes nothing)
   mnemyx run -- <cmd...>                               Run a command, log its exit + stderr tail locally
   mnemyx export (--session <id> | --commit <hash>) [--with-diff] [--out FILE] [--force]
@@ -48,6 +50,13 @@ async function main(argv: string[]): Promise<number> {
   }
   if (cmd === "init") {
     return await cmdInit(rest);
+  }
+  if (cmd === "doctor") {
+    if (rest.length > 0) {
+      console.error(`doctor takes no arguments (see mnemyx --help)`);
+      return 2;
+    }
+    return await cmdDoctor();
   }
   if (cmd === "run") {
     return await cmdRun(rest);

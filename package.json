@@ -15,7 +15,8 @@
   "module": "dist/index.js",
   "type": "module",
   "bin": {
-    "mnemyx": "dist/cli.js"
+    "mnemyx": "dist/cli.js",
+    "mnemyx-server": "dist/index.js"
   },
   "files": [
     "dist",
@@ -42,7 +43,7 @@
     "bun": ">=1.4"
   },
   "scripts": {
-    "build": "bun build ./src/cli.ts ./src/index.ts --outdir ./dist --target bun --packages external && cp ./src/dashboard/page.html ./dist/page.html && chmod +x ./dist/cli.js",
+    "build": "bun build ./src/cli.ts ./src/index.ts --outdir ./dist --target bun --packages external && cp ./src/dashboard/page.html ./dist/page.html && chmod +x ./dist/cli.js ./dist/index.js",
     "build:binaries": "mkdir -p ./dist-bin && for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do bun build ./src/cli.ts --outfile ./dist-bin/mnemyx-$target --target bun-$target --compile --asset ./src/dashboard/page.html && bun build ./src/index.ts --outfile ./dist-bin/mnemyx-server-$target --target bun-$target --compile; done",
     "prepack": "bun run build",
     "test": "bun test",

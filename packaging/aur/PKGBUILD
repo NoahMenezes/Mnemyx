@@ -39,5 +39,22 @@ package() {
   fi
   install -Dm755 "$_pkgname-$pkgver-linux-$_suffix" "$pkgdir/usr/bin/mnemyx"
   install -Dm755 "mnemyx-server-$pkgver-linux-$_suffix" "$pkgdir/usr/bin/mnemyx-server"
-  install -Dm644 "$srcdir/../../LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+  # LICENSE ships in the release tarball, not alongside the binaries:
+  # package it when present, warn loudly when absent (never silently skip).
+  if [[ -f "$srcdir/../../LICENSE" ]]; then
+    install -Dm644 "$srcdir/../../LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  else
+    echo "WARNING: LICENSE not found next to sources — package ships without /usr/share/licenses/$pkgname/LICENSE" >&2
+  fi
+}
+
+check() {
+  if [[ $CARCH == x86_64 ]]; then
+    _suffix=x64
+  else
+    _suffix=arm64
+  fi
+  "./$_pkgname-$pkgver-linux-$_suffix" --version
+  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"0"}}}' \
+    | timeout 20 "./mnemyx-server-$pkgver-linux-$_suffix" 2>/dev/null | grep -q 'serverInfo'
 }

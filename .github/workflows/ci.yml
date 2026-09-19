@@ -43,6 +43,17 @@ jobs:
       - name: Pack dry-run (validates files list + prepack build)
         run: bun pm pack --dry-run
 
+      - name: npm artifact handshake (the published tarball must run)
+        run: |
+          bun run build
+          test -x dist/cli.js
+          test -x dist/index.js
+          test -f dist/page.html
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' | timeout 20 bun run dist/index.js > /tmp/mnemyx-handshake.json 2> /tmp/mnemyx-handshake.stderr
+          grep -q 'serverInfo' /tmp/mnemyx-handshake.json
+          grep -q 'mnemyx' /tmp/mnemyx-handshake.json
+          echo "npm handshake OK"
+
       - name: server.json sanity (parses, version matches package.json)
         run: >-
           bun -e 'const pkg = await Bun.file("package.json").json();

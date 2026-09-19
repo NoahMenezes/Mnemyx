@@ -78,7 +78,14 @@ curl -fsSL --retry 3 -o "$TMP/$CLI" "$BASE/$CLI"
 curl -fsSL --retry 3 -o "$TMP/$SRV" "$BASE/$SRV"
 
 # Verify checksums (subset of the release's SHA256SUMS.txt).
+# NOTE: SHA256SUMS.txt travels over the same channel as the binaries (TOFU).
+# For stronger guarantees, verify the release provenance attestation on the
+# release page before running this script.
 grep -E " ($CLI|$SRV)\$" "$TMP/SHA256SUMS.txt" >"$TMP/check.txt"
+[ "$(wc -l <"$TMP/check.txt")" -eq 2 ] || {
+  echo "mnemyx installer: checksum file missing entries for $CLI / $SRV" >&2
+  exit 1
+}
 (cd "$TMP" && $SHASUM -c check.txt)
 
 mkdir -p "$INSTALL_DIR"
@@ -95,3 +102,4 @@ esac
 
 echo "installed. next: mnemyx init"
 echo "for AI clients, point them at: $INSTALL_DIR/mnemyx-server"
+echo "note: standalone binaries serve keyword search (semantic embeddings need 'bun install -g mnemyx')"

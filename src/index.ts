@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { countEmbeddings, closeDb, countCommits } from "./db.ts";
@@ -30,33 +31,64 @@ registerActivityTools(server);
 
 async function main(): Promise<void> {
   // Shared import pipeline (same code the `mnemyx init` CLI runs).
-  const result = await runImport();
-  console.error(
-    `[mnemyx] import complete: ${result.added} new, ${result.parsed - result.added} already indexed`
-  );
-  if (result.ageFilteredOut > 0) {
+  // Degraded-start guarantee: NOTHING before server.connect() may kill the
+  // process. A locked/corrupt DB, missing HOME, or unreadable history file
+  // must degrade to "serve with what we have", never to process.exit(1)
+  // (which clients surface as `MCP error -32000: Connection closed`).
+  try {
+    const result = await runImport();
     console.error(
-      `[mnemyx] age filter: skipped ${result.ageFilteredOut} entries older than the configured max history age`
+      `[mnemyx] import complete: ${result.added} new, ${result.parsed - result.added} already indexed`
     );
-  }
-  if (!result.exitCodesEnabled) {
-    console.error(`[mnemyx] exit codes: disabled via config`);
-  } else if (result.exitOutcomes > 0) {
+    if (result.ageFilteredOut > 0) {
+      console.error(
+        `[mnemyx] age filter: skipped ${result.ageFilteredOut} entries older than the configured max history age`
+      );
+    }
+    if (!result.exitCodesEnabled) {
+      console.error(`[mnemyx] exit codes: disabled via config`);
+    } else if (result.exitOutcomes > 0) {
+      console.error(
+        `[mnemyx] exit codes: ${result.exitOutcomes} distinct commands logged, ${result.exitUpdated} history rows annotated`
+      );
+    } else {
+      let exitLogHint = "(hook not installed — see README, optional)";
+      try {
+        exitLogHint = `no log at ${getExitLogPath()} (hook not installed — see README, optional)`;
+      } catch {
+        // Missing HOME etc: keep the generic hint, still serve.
+      }
+      console.error(`[mnemyx] exit codes: ${exitLogHint}`);
+    }
+  } catch (err) {
+    // Import failed (locked DB, bad HOME, I/O error...). Log and keep going:
+    // keyword tools serve whatever is already indexed; `mnemyx init` / status
+    // explains the underlying problem on next run.
     console.error(
-      `[mnemyx] exit codes: ${result.exitOutcomes} distinct commands logged, ${result.exitUpdated} history rows annotated`
-    );
-  } else {
-    console.error(
-      `[mnemyx] exit codes: no log at ${getExitLogPath()} (hook not installed — see README, optional)`
+      `[mnemyx] import skipped this launch (${err instanceof Error ? err.message : String(err)}); serving existing index — run \`mnemyx status\` / \`mnemyx init\` to repair`
     );
   }
   // 4. Phase 4: vector backfill runs in the BACKGROUND — the server must
   // serve (keyword path) immediately, never wait on model download/embed.
   // Until vectors exist, semantic queries transparently use keyword search.
-  if (loadConfig().embeddings) {
-    const stored = countEmbeddings(EMBEDDING_MODEL_ID);
-    if (stored > 0) {
-      console.error(`[mnemyx] embeddings: ${stored} vectors stored (${EMBEDDING_MODEL_ID})`);
+  let embeddingsEnabled = true;
+  try {
+    embeddingsEnabled = loadConfig().embeddings;
+  } catch (err) {
+    console.error(
+      `[mnemyx] config unreadable (${err instanceof Error ? err.message : String(err)}); assuming embeddings enabled with keyword fallback`
+    );
+  }
+  if (embeddingsEnabled) {
+    try {
+      const stored = countEmbeddings(EMBEDDING_MODEL_ID);
+      if (stored > 0) {
+        console.error(`[mnemyx] embeddings: ${stored} vectors stored (${EMBEDDING_MODEL_ID})`);
+      }
+    } catch (err) {
+      console.error(
+        `[mnemyx] embeddings: count skipped (${err instanceof Error ? err.message : String(err)}); keyword search active`
+      );
     }
     backfillMissingEmbeddings()
       .then(({ embedded }) => {

@@ -18,7 +18,7 @@ import {
 } from "../hook.ts";
 import { backfillMissingEmbeddings } from "../embeddings.ts";
 import { getDefaultDbPath } from "../db.ts";
-import { VERSION, SERVER_PATH, BUN_BIN, INSTALLED } from "./shared.ts";
+import { VERSION, SERVER_PATH, BUN_BIN, BUN_BIN_OK, INSTALLED, SERVER_PATH_IS_CACHE } from "./shared.ts";
 import { ask, askText } from "./input.ts";
 
 export interface InitFlags {
@@ -112,15 +112,23 @@ export function parseInitFlags(args: string[]): InitFlags {
 
 function registrationBlocks(): { title: string; body: string }[] {
   const serverCmd = `${BUN_BIN} run ${SERVER_PATH}`;
+  const bunWarn = BUN_BIN_OK
+    ? ""
+    : `\n  # WARNING: no bun binary found on PATH — replace "${BUN_BIN}" with the absolute path from \`which bun\` (usually ~/.bun/bin/bun) or clients fail with -32000.`;
   const claudeDesktop = JSON.stringify(
     { mcpServers: { mnemyx: { command: BUN_BIN, args: ["run", SERVER_PATH] } } },
+    null,
+    2
+  );
+  const opencode = JSON.stringify(
+    { mcp: { mnemyx: { type: "local", command: [BUN_BIN, "run", SERVER_PATH], enabled: true, timeout: 30000 } } },
     null,
     2
   );
   return [
     {
       title: "Claude Code (terminal)",
-      body: `  claude mcp add mnemyx -- ${serverCmd}`,
+      body: `  claude mcp add mnemyx -- ${serverCmd}${bunWarn}`,
     },
     {
       title: "Claude Desktop (claude_desktop_config.json)",
@@ -132,6 +140,13 @@ function registrationBlocks(): { title: string; body: string }[] {
     {
       title: "Cursor (Settings → MCP → Add server, or .cursor/mcp.json)",
       body: `  command: ${BUN_BIN}\n  args: ["run", "${SERVER_PATH}"]`,
+    },
+    {
+      title: "OpenCode (opencode.json — includes timeout + restart hint)",
+      body: opencode
+        .split("\n")
+        .map((l) => `  ${l}`)
+        .join("\n"),
     },
   ];
 }
@@ -261,6 +276,14 @@ export async function cmdInit(rawArgs: string[]): Promise<number> {
     if (!INSTALLED) {
       console.log(`  (Paths above point at this source checkout — for a stable client registration prefer a global install: bun install -g mnemyx. bunx cache paths can shift between versions.)\n`);
     }
+    if (INSTALLED && SERVER_PATH_IS_CACHE) {
+      console.log(`  (!) SERVER_PATH looks like an ephemeral bunx/cache path (${SERVER_PATH}).\n      Re-register after a real install (bun install -g mnemyx) or the client breaks on the next update (MCP -32000).\n`);
+    }
+    if (!BUN_BIN_OK) {
+      console.log(`  (!) bun not found on PATH — the blocks above use bare "bun" and WILL fail in GUI clients.\n      Replace with the absolute path (usually ~/.bun/bin/bun, from \`which bun\`).\n`);
+    }
+    console.log(`  Standalone-binary users: point the client at the mnemyx-server binary directly with no \`bun run\` prefix.`);
+    console.log(`  First run can exceed 5s client timeouts — set timeout >= 30000ms where your client supports it.`);
     const claudeBin = Bun.which("claude");
     if (claudeBin) {
       const ok =
@@ -296,6 +319,6 @@ export async function cmdInit(rawArgs: string[]): Promise<number> {
       console.log(`  (No 'claude' binary found — copy the block above for your client.)`);
     }
 
-    console.log(`\nDone. Verify: ask your assistant to call get_recent_commands, or run: mnemyx status`);
+    console.log(`\nDone. Verify: restart your client (or reload MCP servers), then ask your assistant to call get_recent_commands — or run: mnemyx status && mnemyx doctor`);
     return 0;
 }

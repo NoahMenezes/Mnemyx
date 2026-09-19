@@ -56,8 +56,11 @@ mnemyx init
 Walks you through four steps: environment check → history import + git indexing (both idempotent, safe to re-run) → **optional** shell-hook install or v1→v2 upgrade (asks first, never silent) → client registration commands. Then verify:
 
 1. `mnemyx status` — commands indexed, FTS docs, vectors, commits, repos, hook state.
-2. In your client: ask it to call `get_recent_commands` — you should see your real recent commands.
-3. Ask *"have I ever fixed a docker permissions error?"* — `search_history` should find it, including *why* it matches.
+2. `mnemyx doctor` — deployment self-check: bun path, server entry, DB writability, config, plus a real MCP handshake (catches what clients report as `-32000`).
+3. In your client: ask it to call `get_recent_commands` — you should see your real recent commands.
+4. Ask *"have I ever fixed a docker permissions error?"* — `search_history` should find it, including *why* it matches.
+
+If the client shows `MCP error -32000: Connection closed`: run `mnemyx doctor` first — it names the broken piece (stale path, bare `bun`, missing file). Then restart the client.
 
 No client handy? Test with the MCP Inspector (no setup needed):
 
@@ -92,15 +95,31 @@ What each path holds: `~/.mnemyx/` = config + exit-code log; the `share` / `Appl
 
 ## Connect your AI client
 
-The server runs over stdio — the client spawns it locally. Replace the paths with your checkout (or installed package) location: source checkouts use `src/index.ts`, global installs use the package's `dist/index.js` (e.g. `$(npm root -g)/mnemyx/dist/index.js`), and standalone-binary users point at the `mnemyx-server-<os>-<arch>` binary directly with no `bun run` prefix. (`mnemyx init` prints the exact commands for your setup.)
+The server runs over stdio — the client spawns it locally. **Pick the row that matches how you installed** (they are not interchangeable). `mnemyx init` prints the exact commands for your setup — copy its output when in doubt. `mnemyx doctor` verifies the path afterwards.
+
+| How you installed | Server path to register | Command shape |
+|---|---|---|
+| Source checkout (`git clone`) | `<checkout>/src/index.ts` | `<abs-bun> run <checkout>/src/index.ts` |
+| Global install (`bun install -g mnemyx` / `npm install -g mnemyx`) | `<pkg>/dist/index.js` (e.g. `$(npm root -g)/mnemyx/dist/index.js`, never `src/index.ts` — the tarball ships only `dist/`) | `<abs-bun> run <pkg>/dist/index.js` |
+| Standalone binary (Releases / `install.sh` / AUR / Homebrew) | `mnemyx-server-<os>-<arch>` (or `mnemyx-server` on PATH) | `/absolute/path/to/mnemyx-server` **directly, no `bun run` prefix** |
+
+Rules that prevent `MCP error -32000: Connection closed`:
+- Always use **absolute paths** for both the bun binary and the server file (clients spawn with a minimal PATH/cwd — relative paths and bare `bun` break, especially in GUI apps).
+- Prefer a global install over `bunx` cache paths, which shift between versions and rot your registered path.
+- Raise the client timeout to **≥30000ms** on first run (model download + initial import can exceed 5s defaults).
+- **Restart the client / reload MCP servers** after editing config, then verify (`claude mcp list`, `/mcp`, `opencode mcp list`, or Inspector below).
 
 **Claude Code** (terminal — `mnemyx init` can run this for you with consent):
 
 ```bash
-claude mcp add mnemyx -- bun run /absolute/path/to/mnemyx/src/index.ts
+# source checkout:
+claude mcp add mnemyx -- /home/you/.bun/bin/bun run /absolute/path/to/mnemyx/src/index.ts
+# global install:
+claude mcp add mnemyx -- /home/you/.bun/bin/bun run /absolute/path/to/mnemyx/dist/index.js
+# binary: claude mcp add mnemyx -- /absolute/path/to/mnemyx-server
 ```
 
-Then `/mcp` to confirm it's connected.
+Then `/mcp` to confirm it's connected. Restart the terminal session if it doesn't appear.
 
 **Claude Desktop** — add to `claude_desktop_config.json` (`~/.config/Claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/` on macOS). Use the **absolute** bun path — GUI-launched apps inherit a minimal PATH that usually lacks `~/.bun/bin`:
 
@@ -109,11 +128,13 @@ Then `/mcp` to confirm it's connected.
   "mcpServers": {
     "mnemyx": {
       "command": "/home/you/.bun/bin/bun",
-      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+      "args": ["run", "/absolute/path/to/mnemyx/dist/index.js"]
     }
   }
 }
 ```
+
+> Source checkout? Replace `dist/index.js` with `<checkout>/src/index.ts`. Binary? Use `"command": "/absolute/path/to/mnemyx-server"` with no `args`.
 
 Restart Claude Desktop afterwards.
 
@@ -124,11 +145,13 @@ Restart Claude Desktop afterwards.
   "mcpServers": {
     "mnemyx": {
       "command": "/home/you/.bun/bin/bun",
-      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+      "args": ["run", "/absolute/path/to/mnemyx/dist/index.js"]
     }
   }
 }
 ```
+
+Restart Cursor / reload MCP servers afterwards. Source/binary variants as above.
 
 ### Free clients (no Claude subscription needed)
 
@@ -141,12 +164,15 @@ Mnemyx is a plain local stdio server — any MCP client works. Verified shapes:
   "mcp": {
     "mnemyx": {
       "type": "local",
-      "command": ["/home/you/.bun/bin/bun", "run", "/absolute/path/to/mnemyx/src/index.ts"],
-      "enabled": true
+      "command": ["/home/you/.bun/bin/bun", "run", "/absolute/path/to/mnemyx/dist/index.js"],
+      "enabled": true,
+      "timeout": 30000
     }
   }
 }
 ```
+
+> Source checkout? Use `<checkout>/src/index.ts`. Binary? Use `"command": ["/absolute/path/to/mnemyx-server"]`. After editing, restart opencode and check `opencode mcp list`.
 
 **Goose CLI** (open-source, Apache-2.0) — `~/.config/goose/config.yaml` (or `goose configure` → Add Extension → Command-line Extension):
 
@@ -155,9 +181,11 @@ extensions:
   - type: stdio
     name: mnemyx
     cmd: /home/you/.bun/bin/bun
-    args: ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+    args: ["run", "/absolute/path/to/mnemyx/dist/index.js"]
     timeout: 30000
 ```
+
+Restart Goose afterwards. Source/binary variants as above.
 
 **Cline** (VS Code extension, free) — `cline mcp` wizard, or `~/.cline/mcp.json`:
 
@@ -166,12 +194,14 @@ extensions:
   "mcpServers": {
     "mnemyx": {
       "command": "/home/you/.bun/bin/bun",
-      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"],
+      "args": ["run", "/absolute/path/to/mnemyx/dist/index.js"],
       "disabled": false
     }
   }
 }
 ```
+
+Reload the window afterwards.
 
 **Zed** (free IDE) — Settings → AI → MCP Servers → Add Local Server, which writes to your settings file:
 
@@ -180,11 +210,13 @@ extensions:
   "context_servers": {
     "mnemyx": {
       "command": "/home/you/.bun/bin/bun",
-      "args": ["run", "/absolute/path/to/mnemyx/src/index.ts"]
+      "args": ["run", "/absolute/path/to/mnemyx/dist/index.js"]
     }
   }
 }
 ```
+
+Restart Zed afterwards.
 
 No-client testing is always free via the MCP Inspector (see quickstart).
 
@@ -203,7 +235,13 @@ mnemyx init [--yes] [--no-hook] [--shell zsh|bash]
 mnemyx status
 # Read-only health report. Changes nothing. Run this first whenever
 # anything looks off — commands, FTS docs, vectors, commits, repos,
-# hook state, and effective config:
+# hook state, and effective config (see example below).
+
+mnemyx doctor
+# Deployment self-check. Answers "will my client connect?": bun path,
+# server entry, dashboard bundle, DB writability, config, history files,
+# plus a real MCP handshake. Exit 0 = launchable, 1 = fix the ✗ lines,
+# then re-run mnemyx init && mnemyx doctor and restart your client.
 ```
 
 ```text
@@ -549,7 +587,8 @@ history tools unaffected, no stderr → error tools report empty, never crash.
 
 ## Troubleshooting
 
-- **Client says the server fails to start / `bun: command not found`.** The client spawns `bun` with a minimal PATH. Re-register using the absolute bun path (`which bun`) — `mnemyx init` prints it. Verify with `mnemyx status` from a terminal first.
+- **Client shows `MCP error -32000: Connection closed`.** Run `mnemyx doctor` — it names the broken piece. Usual suspects in order: (1) stale server path (moved checkout? `bunx` cache rotated? global install uses `dist/index.js`, never `src/index.ts`); (2) bare `bun` on PATH-less GUI clients (use the absolute path from `which bun`); (3) first-run timeout (raise client timeout to ≥30000ms, pre-warm with `mnemyx init`); (4) forgot to restart the client after editing config. Fix, restart the client, re-run `mnemyx doctor`.
+- **Client says the server fails to start / `bun: command not found`.** The client spawns `bun` with a minimal PATH. Re-register using the absolute bun path (`which bun`) — `mnemyx init` prints it. Verify with `mnemyx doctor` from a terminal first.
 - **Semantic search silently returns keyword results.** Expected on Intel Macs, muslLinux, old glibc, or offline first runs. Check server stderr for `embedding model unavailable: <reason>` — it names the cause. `mode: "semantic"` surfaces the same note inside the tool response.
 - **Hook installed but no `[exit N]` markers.** Reload the shell (`source ~/.zshrc`), run `true; false`, check `tail ~/.mnemyx/exit-codes.log`. If the file stays empty, `python3` is the usual culprit (see Platform support). Restart the server after — outcomes apply at import.
 - **Prompt feels slower after hook install.** ~40 ms per command is the measured cost of the `python3` log call. Remove the snippet block from your rc file to revert instantly.
@@ -590,9 +629,10 @@ src/
     activity.ts     #   sessions, export_notes
   cli.ts            # CLI entry: usage + dispatch (bin target, keep path stable)
   cli/              # CLI commands, one per file:
-    shared.ts       #   version, paths, home helper
+    shared.ts       #   version, bun/server-path resolution, home helper
     input.ts        #   stdin prompts (ask/askText)
     status.ts       #   read-only health report
+    doctor.ts       #   deployment self-check (bun, entry, MCP handshake)
     init.ts         #   setup wizard (consent-gated hook install)
     run.ts          #   transparent run wrapper (exit + stderr capture)
     exportCmd.ts    #   shareable redacted markdown export

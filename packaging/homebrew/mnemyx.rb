@@ -59,13 +59,21 @@ class Mnemyx < Formula
   end
 
   def install
-    bin.install Dir["mnemyx-*"].first => "mnemyx"
+    cli = Dir["mnemyx-*"].reject { |f| f.include?("server") }.first
+    raise "mnemyx CLI binary missing from stage" if cli.nil?
+    bin.install cli => "mnemyx"
     resource("mnemyx-server").stage do
-      bin.install Dir["mnemyx-server-*"].first => "mnemyx-server"
+      srv = Dir["mnemyx-server-*"].first
+      raise "mnemyx-server binary missing from stage" if srv.nil?
+      bin.install srv => "mnemyx-server"
     end
   end
 
   test do
-    assert_match "mnemyx", shell_output("#{bin}/mnemyx --version")
+    assert_match version.to_s, shell_output("#{bin}/mnemyx --version")
+    require "open3"
+    init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}'
+    out, _err, _st = Open3.capture3("#{bin}/mnemyx-server", stdin_data: init)
+    assert_match "serverInfo", out
   end
 end
