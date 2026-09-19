@@ -231,6 +231,16 @@ Two doors, same memory: the **CLI** for your terminal, the **MCP tools** for you
 
 ### CLI reference — every command
 
+Commands are identical on every platform; only how you invoke them differs:
+
+| Platform | Global install | Source checkout | Standalone binary |
+|---|---|---|---|
+| Linux | `mnemyx status` | `bun run src/cli.ts status` | `./mnemyx-linux-x64 status` |
+| macOS | `mnemyx status` | `bun run src/cli.ts status` | `./mnemyx-darwin-arm64 status` |
+| Windows (WSL2 Ubuntu) | `mnemyx status` (inside WSL) | `wsl -- bun run src/cli.ts status` | Use the `linux-x64` binary inside WSL |
+
+Native Windows (PowerShell/cmd) is not supported — see [Platform support](#platform-support). All examples below use the bare `mnemyx` form; prefix with `bun run src/cli.ts` (or `wsl --`) when running from source / WSL.
+
 ```bash
 mnemyx init [--yes] [--no-hook] [--shell zsh|bash]
 # First-time setup AND everyday refresh. Idempotent — re-run anytime to
@@ -334,8 +344,51 @@ Exact argument lists for every assistant-facing tool live in [Tools](#tools) bel
 | Linux arm64 | Full (binaries bundled) | Expected full — needs a field report, fallback covers |
 | macOS Apple Silicon | Full | Expected full — needs a field report, fallback covers |
 | macOS Intel | Full | Keyword only — upstream ships no `darwin/x64` ONNX binary and the Node build rejects WASM devices, so there is nothing to load. The server detects this and serves keyword results |
+| Windows native (PowerShell/cmd) | Not supported | Not supported — use WSL2 (below) |
+| Windows via WSL2 (Ubuntu) | Full (follows the Linux x64 row) | Full when glibc ≥ 2.28, else keyword fallback |
 
 > On Linux arm64 / Apple Silicon: binaries are bundled so full support is expected, but we haven't run it there yet — if you do, please file an issue with your `mnemyx status` output and `uname -m`.
+
+#### Per-platform commands
+
+All CLI verbs are the same everywhere — `init`, `status`, `doctor`, `run`, `export`, `dashboard`, `bench`, `--help`, `--version`. What changes per OS is install, file locations, and the shell hook:
+
+**Linux (Ubuntu/Debian/Fedora/Arch):**
+```bash
+bun install -g mnemyx        # or: npm install -g mnemyx
+mnemyx init                  # imports ~/.zsh_history + ~/.bash_history
+mnemyx status && mnemyx doctor
+mnemyx run -- python3 train.py --lr 0.01
+mnemyx dashboard             # http://127.0.0.1:4877
+```
+- DB: `~/.local/share/mnemyx/mnemyx.db` (or `$XDG_DATA_HOME/mnemyx/`). Config + exit log: `~/.mnemyx/`. Models: `~/.cache/mnemyx/models`.
+- Hook: `~/.zshrc` (zsh `precmd`) or `~/.bashrc` (`PROMPT_COMMAND`). Needs `python3` (`sudo apt install python3` / `sudo dnf install python3`).
+- Binaries: `mnemyx-linux-x64` / `mnemyx-linux-arm64` run directly, no `bun run` prefix.
+
+**macOS (Apple Silicon + Intel):**
+```bash
+bun install -g mnemyx
+mnemyx init --shell zsh      # default shell is zsh since Catalina
+mnemyx status && mnemyx doctor
+mnemyx run -- python3 train.py
+```
+- DB: `~/Library/Application Support/mnemyx/mnemyx.db`. Config + exit log: `~/.mnemyx/`. Models: `~/.cache/mnemyx/models`.
+- Hook: `~/.zshrc` (zsh is the default; bash is 3.2 — snippets use only constructs legal in both). First `python3` run pops a Command Line Tools install dialog (accept once, or `brew install python3`); `mnemyx init` probes this and warns.
+- Binaries: `mnemyx-darwin-arm64` (Apple Silicon) / `mnemyx-darwin-x64` (Intel, keyword-only — no ONNX prebuild).
+- Accented filenames match regardless of NFD vs NFC normalization.
+
+**Windows:**
+```powershell
+# Not supported natively (no PowerShell/cmd hook, no native history parsers).
+# Use WSL2 + Ubuntu, then follow the Linux steps inside WSL:
+wsl --install -d Ubuntu
+wsl -- bun install -g mnemyx
+wsl -- mnemyx init
+wsl -- mnemyx status
+```
+- Run **everything** (CLI, MCP server, client registration paths) inside the same WSL distro — Windows-side history (`%APPDATA%`) is never read; only `~/.zsh_history` / `~/.bash_history` inside WSL are indexed.
+- Register MCP clients with the WSL paths (e.g. `/home/you/.bun/bin/bun run …/dist/index.js`), or run a WSL-backed client. GUI clients on the Windows side spawning `bun` need the `\\wsl$\Ubuntu\…` path — prefer running the client inside WSL to avoid it.
+- Standalone `mnemyx-linux-x64` binary works inside WSL; there is no native `.exe` build.
 
 Notes:
 - macOS ships bash 3.2 and zsh 5.x — the hook snippets use only constructs legal in both (verified). `python3` is required for the hook: on a fresh Mac the first `python3` run pops a Command Line Tools install dialog (accept it once, or `brew install python3`); `mnemyx init` probes this and warns.

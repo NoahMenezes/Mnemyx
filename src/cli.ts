@@ -26,7 +26,20 @@ Usage:
                                                            Shareable redacted markdown (stdout, or FILE owner-only)
   mnemyx dashboard [--port 4877] [--no-open]               Local-only web UI (timeline, search, sessions)
   mnemyx --help | -h                                   This text
-  mnemyx --version | -v                                Print version`;
+  mnemyx --version | -v                                Print version
+
+Platforms:
+  Linux / macOS — fully supported (zsh + bash).
+  Windows — not natively supported; use WSL2 (Ubuntu) and follow the Linux steps.
+  Commands are identical on every platform; only install paths differ (see README).
+
+Run it:
+  Linux/macOS (global install):  mnemyx status
+  Linux/macOS (source checkout): bun run src/cli.ts status
+  Windows (WSL2 Ubuntu):         wsl -- bun run src/cli.ts status
+
+Docs: README "Platform support" + "CLI reference" (per-OS paths, hooks, examples).
+Verify: mnemyx status && mnemyx doctor`;
 }
 
 // --- main -----------------------------------------------------------------------
