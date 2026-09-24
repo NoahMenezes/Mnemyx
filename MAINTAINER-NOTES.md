@@ -13,7 +13,7 @@ Reminders about repo-health files and what still needs attention. Not user docs.
 
 ## Follow-ups
 
-- [ ] Create missing labels (defaults like `bug`, `documentation`, `good first issue` already exist). Needs `gh auth login`, then:
+- [x] Create missing labels — done 2026-09-24 (`dependencies`, `security`; defaults already covered the rest).
   ```bash
   gh label create dependencies --repo NoahMenezes/Mnemyx \
     --description "Pull requests that update a dependency file" --color "0366d6"
