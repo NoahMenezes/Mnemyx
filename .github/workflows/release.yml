@@ -83,7 +83,7 @@ jobs:
         # v3 also runs on Node 24 (v2 pulled Node 20, now deprecated).
         if: github.event.repository.visibility == 'public'
         continue-on-error: true
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist-bin/mnemyx-*, dist-bin/SHA256SUMS.txt"
 
