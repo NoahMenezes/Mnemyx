@@ -13,7 +13,13 @@ Reminders about repo-health files and what still needs attention. Not user docs.
 
 ## Follow-ups
 
-- [ ] Create a `dependencies` label in GitHub (Issues → Labels), or Dependabot PRs show up unlabeled.
+- [ ] Create missing labels (defaults like `bug`, `documentation`, `good first issue` already exist). Needs `gh auth login`, then:
+  ```bash
+  gh label create dependencies --repo NoahMenezes/Mnemyx \
+    --description "Pull requests that update a dependency file" --color "0366d6"
+  gh label create security --repo NoahMenezes/Mnemyx \
+    --description "Security reports and redaction issues (never post real secrets)" --color "ee0701"
+  ```
 - [ ] Dependabot PRs run the full CI gate (typecheck + lint + 186 tests) — safe to merge on green.
 - [ ] Enable private vulnerability reporting (Settings → Security) — SECURITY.md points reporters there.
 - [ ] Branch protection for `main`: require `check` job + PR before merging.
