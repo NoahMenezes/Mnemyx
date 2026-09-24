@@ -48,6 +48,8 @@
     "prepack": "bun run build",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
+    "lint": "bunx biome lint .",
+    "lint:fix": "bunx biome lint --write .",
     "prepublishOnly": "bun run typecheck && bun test"
   },
   "devDependencies": {

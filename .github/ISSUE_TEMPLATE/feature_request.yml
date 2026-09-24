@@ -1,0 +1,46 @@
+name: Feature request
+description: An idea that fits this project's scope.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you (or your AI assistant) do today? What did you try instead?
+      placeholder: "I can't tell which project a command ran in without the v2 hook…"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should happen? Which tool/CLI command does it touch?
+      placeholder: "Add an optional cwd hint to get_recent_commands…"
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope check
+      description: Out-of-scope areas need a strong case (see CONTRIBUTING.md).
+      options:
+        - Fits current scope (macOS/Linux, bash/zsh, Bun, local-first, stdio MCP)
+        - Touches an out-of-scope area (Windows native / fish / cloud / telemetry / network) — justification below
+    validations:
+      required: true
+  - type: textarea
+    id: degrade
+    attributes:
+      label: Degradation story
+      description: This project requires new behavior to degrade when its input is absent. How does your proposal behave without its input?
+      placeholder: "Without X, the tool falls back to Y (current behavior)…"
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: "Config flag vs. new tool vs. docs-only…"
+    validations:
+      required: false

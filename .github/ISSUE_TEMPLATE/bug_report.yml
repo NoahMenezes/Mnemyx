@@ -1,0 +1,65 @@
+name: Bug report
+description: Something broken? Tell us what happened.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! For security issues (credential leaks, redaction bypasses), use a [private security advisory](https://github.com/NoahMenezes/Mnemyx/security/advisories/new) instead — see `SECURITY.md`.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you expected vs. what you actually saw (paste exact output where possible).
+      placeholder: "Expected search_history to find my docker fix; got empty results."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps. Use FAKE credentials only — never paste real secrets.
+      placeholder: |
+        1. `mnemyx init`
+        2. Ask client: "Use mnemyx search_history for 'docker wont start'"
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Source checkout (`git clone`)
+        - Global install (`bun install -g mnemyx` / npm / pnpm / yarn)
+        - Standalone binary (Releases / install.sh / AUR / Homebrew)
+        - bunx trial
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS / shell
+      description: e.g. Ubuntu 24.04 / zsh 5.9, macOS 15 Apple Silicon / zsh, WSL2 Ubuntu / bash
+      placeholder: "Ubuntu 24.04 / zsh 5.9"
+    validations:
+      required: true
+  - type: textarea
+    id: health
+    attributes:
+      label: Health output
+      description: Paste the output of `mnemyx status` and the verdict of `mnemyx doctor`. Redact any secrets first.
+      render: text
+      placeholder: |
+        Paste `mnemyx status` here, plus what `mnemyx doctor` reported.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `mnemyx --version`
+      placeholder: "0.1.2"
+    validations:
+      required: false

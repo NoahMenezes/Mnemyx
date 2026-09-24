@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / Discussion
+    url: https://github.com/NoahMenezes/Mnemyx/issues/new?template=feature_request.yml
+    about: Not sure it's a bug? File it as a feature request and we'll triage.
+  - name: Security report (private)
+    url: https://github.com/NoahMenezes/Mnemyx/security/advisories/new
+    about: Credential leaks, redaction bypasses, injection — never file these publicly. See SECURITY.md.

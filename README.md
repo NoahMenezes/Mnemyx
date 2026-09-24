@@ -1,6 +1,7 @@
 # Mnemyx
 
 [![npm version](https://img.shields.io/npm/v/mnemyx.svg)](https://www.npmjs.com/package/mnemyx)
+[![CI](https://github.com/NoahMenezes/Mnemyx/actions/workflows/ci.yml/badge.svg)](https://github.com/NoahMenezes/Mnemyx/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-Bun_%E2%89%A5_1.4-black.svg)](https://bun.sh)
 
@@ -663,19 +664,21 @@ history tools unaffected, no stderr → error tools report empty, never crash.
 
 ## Contributing
 
+We welcome bug reports, docs, tests, and code — start with
+[CONTRIBUTING.md](CONTRIBUTING.md) (setup, scope, coding standards, tests, PR process),
+our [Code of Conduct](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md) for
+vulnerability reports (never file those publicly).
+
 ```bash
 bun install          # deps (Bun only — never npm/yarn)
-bunx tsc --noEmit    # must be clean before any PR
-bun test             # 186 tests, hermetic (temp DBs/configs/repos, stubbed model) — must be green
+bun run typecheck    # must be clean before any PR
+bun run lint         # Biome lint — must be clean before any PR
+bun test             # hermetic suite (temp DBs/configs/repos, stubbed model) — must be green
 bun run src/cli.ts status   # health check against your real data
 bun run src/cli.ts doctor   # deployability check (bun, entry, live MCP handshake)
 ```
 
-- Runtime is Bun; storage is `bun:sqlite` (no `better-sqlite3`, no native compilation); MCP over stdio only.
-- Scope: macOS/Linux, bash/zsh. Out of scope unless explicitly revisited: Windows/PowerShell/fish/WSL, cloud sync, telemetry, embeddings that need a network call at query time.
-- Every phase must stay shippable alone: new behavior degrades to old behavior when its input is absent (no hook log → Phase 2 results; no model → keyword search; no history file → skip, never crash).
-- stdout belongs to the MCP transport in `src/index.ts` — log to stderr only.
-- Test against real history in an isolated way: point `HOME` at a temp dir for import tests, use temp DB paths via `initDb(path)`, never commit `*.db*` files.
+AI agents: see [AGENTS.md](AGENTS.md) for the short machine-readable version of the same rules.
 
 ## Releases & provenance (maintainers)
 

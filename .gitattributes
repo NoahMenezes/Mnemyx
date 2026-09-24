@@ -1,0 +1,14 @@
+# Normalize line endings and keep the repo clean across macOS/Linux/WSL.
+* text=auto eol=lf
+
+# Never commit local runtime artifacts (belt-and-suspenders behind .gitignore).
+*.db binary
+*.db-wal binary
+*.db-shm binary
+
+# Shell scripts keep LF + exec bit through checkouts.
+*.sh text eol=lf
+
+# Compiled binaries are never committed (built by release.yml); if one ever
+# lands in-tree, treat it as binary.
+dist-bin/* binary
